@@ -126,6 +126,17 @@ enum Commands {
         #[arg(long, short)]
         all: bool,
     },
+
+    /// Remove all unmerged PRs from the native GitHub stack
+    Unstack {
+        /// Skip confirmation
+        #[arg(long, short = 'y')]
+        yes: bool,
+
+        /// Git remote
+        #[arg(long)]
+        remote: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -247,6 +258,9 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Untrack { bookmarks, all }) => {
             cli::run_untrack(&path, &bookmarks, cli::UntrackOptions { all }).await?;
+        }
+        Some(Commands::Unstack { yes, remote }) => {
+            cli::run_unstack(&path, remote.as_deref(), yes).await?;
         }
     }
 

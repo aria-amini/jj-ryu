@@ -4,9 +4,54 @@ use crate::cli::style::{self, Stylize, check, pipe, up_arrow};
 use anstream::println;
 use jj_ryu::error::Result;
 use jj_ryu::graph::build_change_graph;
-use jj_ryu::repo::JjWorkspace;
+use jj_ryu::platform::{create_platform_service, parse_repo_info};
+use jj_ryu::repo::{JjWorkspace, select_remote};
 use jj_ryu::tracking::{load_pr_cache, load_tracking};
+use std::collections::HashMap;
 use std::path::Path;
+
+/// Native stack membership info, keyed by branch name
+struct StackAnnotation {
+    number: u64,
+    total: usize,
+    /// Branch name -> (1-based position, merged)
+    entries: HashMap<String, (usize, bool)>,
+}
+
+/// Resolve the platform config for the default remote (sync, best-effort)
+fn stack_lookup_config(workspace: &JjWorkspace) -> Option<jj_ryu::types::PlatformConfig> {
+    let remotes = workspace.git_remotes().ok()?;
+    let remote_name = select_remote(&remotes, None).ok()?;
+    let remote_info = remotes.iter().find(|r| r.name == remote_name)?;
+    parse_repo_info(&remote_info.url).ok()
+}
+
+/// Look up native stack membership via a PR number.
+///
+/// Best-effort: any failure (unsupported platform, stacks unavailable, auth
+/// problems) yields `None` and the view renders without stack info.
+async fn native_stack_annotation(
+    config: jj_ryu::types::PlatformConfig,
+    pr_number: u64,
+) -> Option<StackAnnotation> {
+    let platform = create_platform_service(&config).await.ok()?;
+    if !platform.supports_native_stacks() {
+        return None;
+    }
+
+    let stack = platform.find_stack_for_pr(pr_number).await.ok()??;
+    let entries = stack
+        .pull_requests
+        .iter()
+        .enumerate()
+        .map(|(i, e)| (e.head.ref_field.clone(), (i + 1, e.merged_at.is_some())))
+        .collect();
+    Some(StackAnnotation {
+        number: stack.number,
+        total: stack.pull_requests.len(),
+        entries,
+    })
+}
 
 /// Run the analyze command (default when no subcommand given)
 ///
@@ -42,6 +87,22 @@ pub async fn run_analyze(path: &Path) -> Result<()> {
         println!("{}", "Stack has no segments".muted());
         return Ok(());
     }
+
+    let annotation = match stack_lookup_config(&workspace) {
+        Some(config) => {
+            let bottom_pr = stack
+                .segments
+                .iter()
+                .flat_map(|s| &s.bookmarks)
+                .find_map(|b| pr_cache.get(&b.name))
+                .map(|p| p.number);
+            match bottom_pr {
+                Some(pr_number) => native_stack_annotation(config, pr_number).await,
+                None => None,
+            }
+        }
+        None => None,
+    };
 
     // Print header
     let leaf = stack.segments.last().unwrap();
@@ -107,9 +168,32 @@ pub async fn run_analyze(path: &Path) -> Result<()> {
                         String::new()
                     };
 
+                    // Native stack membership (position/total, or merged)
+                    let stack_info = annotation
+                        .as_ref()
+                        .and_then(|a| {
+                            a.entries
+                                .get(*bm)
+                                .map(|(pos, merged)| (a.number, a.total, *pos, *merged))
+                        })
+                        .map(|(number, total, pos, merged)| {
+                            if merged {
+                                format!(" {}", "merged".success())
+                            } else {
+                                format!(" {}", format!("stack #{number} {pos}/{total}").muted())
+                            }
+                        })
+                        .unwrap_or_default();
+
                     // Dim untracked bookmark names
                     if is_tracked {
-                        println!("       [{}{}]{}", bm.accent(), pr_info.muted(), status);
+                        println!(
+                            "       [{}{}]{}{}",
+                            bm.accent(),
+                            pr_info.muted(),
+                            stack_info,
+                            status
+                        );
                     } else {
                         println!("       [{}]{}", bm.muted(), status);
                     }

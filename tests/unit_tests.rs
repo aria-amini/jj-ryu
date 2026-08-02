@@ -842,6 +842,55 @@ mod stack_register_test {
     }
 }
 
+mod unstack_test {
+    use crate::common::fixtures::github_config;
+    use crate::common::mock_platform::{MockPlatformService, make_stack};
+    use jj_ryu::unstack::{UnstackOutcome, find_submitted_stack, unstack};
+
+    #[tokio::test]
+    async fn test_find_submitted_stack_first_match() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_stack_for_pr(2, Some(make_stack(7, &[1, 2, 3])));
+
+        let stack = find_submitted_stack(&mock, &[1, 2, 3]).await.unwrap();
+        assert_eq!(stack.unwrap().number, 7);
+        // Stops at the first hit (PR 2)
+        assert_eq!(mock.get_find_stack_calls(), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_find_submitted_stack_none_when_unstacked() {
+        let mock = MockPlatformService::with_config(github_config());
+
+        let stack = find_submitted_stack(&mock, &[1, 2]).await.unwrap();
+        assert!(stack.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unstack_dissolved() {
+        let mock = MockPlatformService::with_config(github_config());
+
+        let outcome = unstack(&mock, 7).await.unwrap();
+        assert_eq!(outcome, UnstackOutcome::Dissolved { stack_number: 7 });
+        assert_eq!(mock.get_unstack_calls(), vec![7]);
+    }
+
+    #[tokio::test]
+    async fn test_unstack_remaining() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_unstack_remaining(make_stack(7, &[1]));
+
+        let outcome = unstack(&mock, 7).await.unwrap();
+        assert_eq!(
+            outcome,
+            UnstackOutcome::Remaining {
+                stack_number: 7,
+                remaining: 1
+            }
+        );
+    }
+}
+
 mod sync_test {
     use jj_ryu::error::Error;
     use jj_ryu::repo::select_remote;

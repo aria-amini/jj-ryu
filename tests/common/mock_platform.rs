@@ -54,6 +54,8 @@ pub struct MockPlatformService {
     next_stack_number: AtomicU64,
     find_pr_responses: Mutex<HashMap<String, Option<PullRequest>>>,
     find_stack_responses: Mutex<HashMap<u64, Option<PrStack>>>,
+    // Response for `unstack` (None = dissolved)
+    unstack_response: Mutex<Option<PrStack>>,
     // Call tracking
     find_pr_calls: Mutex<Vec<String>>,
     create_pr_calls: Mutex<Vec<CreatePrCall>>,
@@ -83,6 +85,7 @@ impl MockPlatformService {
             next_stack_number: AtomicU64::new(1),
             find_pr_responses: Mutex::new(HashMap::new()),
             find_stack_responses: Mutex::new(HashMap::new()),
+            unstack_response: Mutex::new(None),
             find_pr_calls: Mutex::new(Vec::new()),
             create_pr_calls: Mutex::new(Vec::new()),
             update_base_calls: Mutex::new(Vec::new()),
@@ -157,6 +160,11 @@ impl MockPlatformService {
             .lock()
             .unwrap()
             .insert(pr_number, stack);
+    }
+
+    /// Make `unstack` return a remaining stack instead of dissolving it
+    pub fn set_unstack_remaining(&self, stack: PrStack) {
+        *self.unstack_response.lock().unwrap() = Some(stack);
     }
 
     // === Call verification methods ===
@@ -405,7 +413,7 @@ impl PlatformService for MockPlatformService {
 
     async fn unstack(&self, stack_number: u64) -> Result<Option<PrStack>> {
         self.unstack_calls.lock().unwrap().push(stack_number);
-        Ok(None)
+        Ok(self.unstack_response.lock().unwrap().clone())
     }
 
     async fn merge_pr_async(

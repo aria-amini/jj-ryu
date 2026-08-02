@@ -22,6 +22,7 @@ pub mod repo;
 pub mod submit;
 pub mod tracking;
 pub mod types;
+pub mod unstack;
 
 pub use error::{Error, Result};
 pub use types::*;
