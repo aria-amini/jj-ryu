@@ -1,17 +1,15 @@
 //! Phase 3: Submission execution
 //!
-//! Executes the submission plan: push, create PRs, update bases, add comments.
+//! Executes the submission plan: push, create PRs, update bases, register stack.
 
 use crate::error::{Error, Result};
 use crate::platform::PlatformService;
 use crate::repo::JjWorkspace;
 use crate::submit::plan::{PrBaseUpdate, PrToCreate};
+use crate::submit::stack_register;
 use crate::submit::{ExecutionStep, Phase, ProgressCallback, PushStatus, SubmissionPlan};
-use crate::types::{Bookmark, Platform, PullRequest};
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
-use serde::{Deserialize, Serialize};
+use crate::types::{Bookmark, PullRequest};
 use std::collections::HashMap;
-use std::fmt::Write;
 
 /// Result of submission execution
 #[derive(Debug, Clone, Default)]
@@ -59,38 +57,6 @@ pub enum StepOutcome {
     /// Step failed but execution should continue (soft fail)
     SoftError(String),
 }
-
-/// Stack comment data embedded in PR comments
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StackCommentData {
-    /// Schema version
-    pub version: u8,
-    /// PRs in the stack, ordered root to leaf
-    pub stack: Vec<StackItem>,
-    /// Base branch name (e.g., "main")
-    pub base_branch: String,
-}
-
-/// A single item in the stack
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct StackItem {
-    /// Bookmark name for this PR
-    pub bookmark_name: String,
-    /// URL to the PR
-    pub pr_url: String,
-    /// PR number
-    pub pr_number: u64,
-    /// PR title
-    pub pr_title: String,
-}
-
-/// Prefix for stack comment data
-pub const COMMENT_DATA_PREFIX: &str = "<!--- JJ-RYU_STACK: ";
-const COMMENT_DATA_PREFIX_OLD: &str = "<!--- JJ-STACK_INFO: ";
-/// Postfix for stack comment data
-pub const COMMENT_DATA_POSTFIX: &str = " --->";
-/// Marker for the current PR in stack comments
-pub const STACK_COMMENT_THIS_PR: &str = "👈";
 
 // =============================================================================
 // Step Execution Functions (testable in isolation)
@@ -159,7 +125,7 @@ pub async fn execute_publish_pr(platform: &dyn PlatformService, pr: &PullRequest
 /// 2. Update PR bases
 /// 3. Create new PRs
 /// 4. Publish draft PRs
-/// 5. Add/update stack comments
+/// 5. Register PRs as a native GitHub stack
 pub async fn execute_submission(
     plan: &SubmissionPlan,
     workspace: &mut JjWorkspace,
@@ -174,10 +140,11 @@ pub async fn execute_submission(
             .on_message("Dry run - no changes will be made")
             .await;
         report_dry_run(plan, progress).await;
+        stack_register::report_stack_dry_run(platform, plan, progress).await;
         return Ok(result);
     }
 
-    // Track all PRs (existing + created) for comment generation
+    // Track all PRs (existing + created) for stack registration
     let mut bookmark_to_pr: HashMap<String, PullRequest> = plan.existing_prs.clone();
 
     // Phase: Executing all steps
@@ -188,7 +155,7 @@ pub async fn execute_submission(
 
         match outcome {
             StepOutcome::Success(Some((bookmark, pr))) => {
-                // Track the PR for comment generation
+                // Track the PR for stack registration
                 match step {
                     ExecutionStep::CreatePr(_) => result.created_prs.push(pr.clone()),
                     ExecutionStep::UpdateBase(_) | ExecutionStep::PublishPr(_) => {
@@ -216,24 +183,14 @@ pub async fn execute_submission(
         }
     }
 
-    // Phase: Adding stack comments
-    progress.on_phase(Phase::AddingComments).await;
+    // Phase: Registering native GitHub stack (soft-fail)
+    progress.on_phase(Phase::RegisteringStack).await;
 
-    if !bookmark_to_pr.is_empty() {
-        let stack_data = build_stack_comment_data(plan, &bookmark_to_pr);
-
-        for (idx, item) in stack_data.stack.iter().enumerate() {
-            if let Err(e) =
-                create_or_update_stack_comment(platform, &stack_data, idx, item.pr_number).await
-            {
-                let msg = format!(
-                    "Failed to update stack comment for {}: {e}",
-                    item.bookmark_name
-                );
-                progress.on_error(&Error::Platform(msg.clone())).await;
-                result.soft_fail(msg);
-            }
-        }
+    if let Some(msg) =
+        stack_register::execute_stack_registration(platform, plan, &bookmark_to_pr, progress).await
+    {
+        progress.on_error(&Error::Platform(msg.clone())).await;
+        result.soft_fail(msg);
     }
 
     progress.on_phase(Phase::Complete).await;
@@ -344,132 +301,6 @@ pub fn format_step_for_dry_run(step: &ExecutionStep, remote: &str) -> String {
         // All other steps use Display impl
         _ => format!("  → {step}"),
     }
-}
-
-// =============================================================================
-// Stack Comment Functions
-// =============================================================================
-
-/// Build stack comment data from the plan and PRs
-#[allow(clippy::implicit_hasher)]
-pub fn build_stack_comment_data(
-    plan: &SubmissionPlan,
-    bookmark_to_pr: &HashMap<String, PullRequest>,
-) -> StackCommentData {
-    let stack: Vec<StackItem> = plan
-        .segments
-        .iter()
-        .filter_map(|seg| {
-            bookmark_to_pr.get(&seg.bookmark.name).map(|pr| StackItem {
-                bookmark_name: seg.bookmark.name.clone(),
-                pr_url: pr.html_url.clone(),
-                pr_number: pr.number,
-                pr_title: pr.title.clone(),
-            })
-        })
-        .collect();
-
-    StackCommentData {
-        version: 1,
-        stack,
-        base_branch: plan.default_branch.clone(),
-    }
-}
-
-/// Format the stack comment body for a PR (defaults to GitHub format)
-///
-/// For platform-specific formatting, use internal `format_stack_comment_for_platform`.
-pub fn format_stack_comment(data: &StackCommentData, current_idx: usize) -> Result<String> {
-    format_stack_comment_for_platform(data, current_idx, Platform::GitHub)
-}
-
-/// Format the stack comment body for a PR with platform-specific formatting
-///
-/// - GitHub: Uses `#N` which auto-links to PRs
-/// - GitLab: Uses `[title !N](url)` since `#N` links to issues, not MRs
-fn format_stack_comment_for_platform(
-    data: &StackCommentData,
-    current_idx: usize,
-    platform: Platform,
-) -> Result<String> {
-    let encoded_data = BASE64.encode(
-        serde_json::to_string(data)
-            .map_err(|e| Error::Internal(format!("Failed to serialize stack data: {e}")))?,
-    );
-
-    let mut body = format!("{COMMENT_DATA_PREFIX}{encoded_data}{COMMENT_DATA_POSTFIX}\n");
-
-    // Reverse order: newest/leaf at top, oldest at bottom
-    let reversed_idx = data.stack.len() - 1 - current_idx;
-    for (i, item) in data.stack.iter().rev().enumerate() {
-        let is_current = i == reversed_idx;
-        match platform {
-            Platform::GitHub => {
-                // GitHub: "* PR title #N" - #N auto-links to PRs
-                if is_current {
-                    let _ = writeln!(
-                        body,
-                        "* **{} #{} {STACK_COMMENT_THIS_PR}**",
-                        item.pr_title, item.pr_number
-                    );
-                } else {
-                    let _ = writeln!(body, "* {} #{}", item.pr_title, item.pr_number);
-                }
-            }
-            Platform::GitLab => {
-                // GitLab: "* [PR title !N](url)" - !N is MR reference, full link for clickability
-                if is_current {
-                    let _ = writeln!(
-                        body,
-                        "* **[{} !{}]({}) {STACK_COMMENT_THIS_PR}**",
-                        item.pr_title, item.pr_number, item.pr_url
-                    );
-                } else {
-                    let _ = writeln!(
-                        body,
-                        "* [{} !{}]({})",
-                        item.pr_title, item.pr_number, item.pr_url
-                    );
-                }
-            }
-        }
-    }
-
-    // Add base branch at bottom
-    let _ = writeln!(body, "* `{}`", data.base_branch);
-
-    let _ = write!(
-        body,
-        "\n---\nThis stack of pull requests is managed by [jj-ryu](https://github.com/dmmulroy/jj-ryu)."
-    );
-
-    Ok(body)
-}
-
-/// Create or update the stack comment on a PR
-async fn create_or_update_stack_comment(
-    platform: &dyn PlatformService,
-    data: &StackCommentData,
-    current_idx: usize,
-    pr_number: u64,
-) -> Result<()> {
-    let body = format_stack_comment_for_platform(data, current_idx, platform.config().platform)?;
-
-    // Find existing comment by looking for our data prefix (check both old and new)
-    let comments = platform.list_pr_comments(pr_number).await?;
-    let existing = comments
-        .iter()
-        .find(|c| c.body.contains(COMMENT_DATA_PREFIX) || c.body.contains(COMMENT_DATA_PREFIX_OLD));
-
-    if let Some(comment) = existing {
-        platform
-            .update_pr_comment(pr_number, comment.id, &body)
-            .await?;
-    } else {
-        platform.create_pr_comment(pr_number, &body).await?;
-    }
-
-    Ok(())
 }
 
 // =============================================================================
@@ -617,190 +448,6 @@ mod tests {
         let step = ExecutionStep::PublishPr(pr);
         let output = format_step_for_dry_run(&step, "origin");
         assert_eq!(output, "  → publish PR #99 (feat-a)");
-    }
-
-    // === Stack comment tests ===
-
-    #[test]
-    fn test_build_stack_comment_data() {
-        let plan = SubmissionPlan {
-            segments: vec![
-                NarrowedBookmarkSegment {
-                    bookmark: make_bookmark("feat-a"),
-                    changes: vec![],
-                },
-                NarrowedBookmarkSegment {
-                    bookmark: make_bookmark("feat-b"),
-                    changes: vec![],
-                },
-            ],
-            constraints: vec![],
-            execution_steps: vec![],
-            existing_prs: HashMap::new(),
-            remote: "origin".to_string(),
-            default_branch: "main".to_string(),
-        };
-
-        let mut bookmark_to_pr = HashMap::new();
-        bookmark_to_pr.insert("feat-a".to_string(), make_pr(1, "feat-a"));
-        bookmark_to_pr.insert("feat-b".to_string(), make_pr(2, "feat-b"));
-
-        let data = build_stack_comment_data(&plan, &bookmark_to_pr);
-
-        assert_eq!(data.version, 1);
-        assert_eq!(data.base_branch, "main");
-        assert_eq!(data.stack.len(), 2);
-        assert_eq!(data.stack[0].bookmark_name, "feat-a");
-        assert_eq!(data.stack[0].pr_number, 1);
-        assert_eq!(data.stack[0].pr_title, "PR for feat-a");
-        assert_eq!(data.stack[1].bookmark_name, "feat-b");
-        assert_eq!(data.stack[1].pr_number, 2);
-    }
-
-    #[test]
-    fn test_build_stack_comment_data_filters_missing_prs() {
-        let plan = SubmissionPlan {
-            segments: vec![
-                NarrowedBookmarkSegment {
-                    bookmark: make_bookmark("feat-a"),
-                    changes: vec![],
-                },
-                NarrowedBookmarkSegment {
-                    bookmark: make_bookmark("feat-b"),
-                    changes: vec![],
-                },
-            ],
-            constraints: vec![],
-            execution_steps: vec![],
-            existing_prs: HashMap::new(),
-            remote: "origin".to_string(),
-            default_branch: "main".to_string(),
-        };
-
-        // Only feat-a has a PR
-        let mut bookmark_to_pr = HashMap::new();
-        bookmark_to_pr.insert("feat-a".to_string(), make_pr(1, "feat-a"));
-
-        let data = build_stack_comment_data(&plan, &bookmark_to_pr);
-
-        assert_eq!(data.stack.len(), 1);
-        assert_eq!(data.stack[0].bookmark_name, "feat-a");
-    }
-
-    #[test]
-    fn test_format_stack_comment_marks_current() {
-        let data = StackCommentData {
-            version: 1,
-            stack: vec![
-                StackItem {
-                    bookmark_name: "feat-a".to_string(),
-                    pr_url: "https://example.com/1".to_string(),
-                    pr_number: 1,
-                    pr_title: "feat: add auth".to_string(),
-                },
-                StackItem {
-                    bookmark_name: "feat-b".to_string(),
-                    pr_url: "https://example.com/2".to_string(),
-                    pr_number: 2,
-                    pr_title: "feat: add sessions".to_string(),
-                },
-            ],
-            base_branch: "main".to_string(),
-        };
-
-        // Format for PR #2 (index 1)
-        let body = format_stack_comment(&data, 1).unwrap();
-        assert!(body.contains(&format!("#{} {STACK_COMMENT_THIS_PR}", 2)));
-        assert!(!body.contains(&format!("#{} {STACK_COMMENT_THIS_PR}", 1)));
-    }
-
-    #[test]
-    fn test_format_stack_comment_contains_prefix() {
-        let data = StackCommentData {
-            version: 1,
-            stack: vec![StackItem {
-                bookmark_name: "feat-a".to_string(),
-                pr_url: "https://example.com/1".to_string(),
-                pr_number: 1,
-                pr_title: "feat: add auth".to_string(),
-            }],
-            base_branch: "main".to_string(),
-        };
-
-        let body = format_stack_comment(&data, 0).unwrap();
-        assert!(body.contains(COMMENT_DATA_PREFIX));
-        assert!(body.contains(COMMENT_DATA_POSTFIX));
-    }
-
-    #[test]
-    fn test_format_stack_comment_gitlab_uses_exclamation_mark() {
-        let data = StackCommentData {
-            version: 1,
-            stack: vec![
-                StackItem {
-                    bookmark_name: "feat-a".to_string(),
-                    pr_url: "https://gitlab.com/test/test/-/merge_requests/1".to_string(),
-                    pr_number: 1,
-                    pr_title: "feat: add auth".to_string(),
-                },
-                StackItem {
-                    bookmark_name: "feat-b".to_string(),
-                    pr_url: "https://gitlab.com/test/test/-/merge_requests/2".to_string(),
-                    pr_number: 2,
-                    pr_title: "feat: add sessions".to_string(),
-                },
-            ],
-            base_branch: "main".to_string(),
-        };
-
-        // GitLab format should use !N and full URLs
-        let body = format_stack_comment_for_platform(&data, 1, Platform::GitLab).unwrap();
-
-        // Should use !N (MR reference) not #N
-        assert!(body.contains("!1"), "GitLab should use !N for MRs: {body}");
-        assert!(body.contains("!2"), "GitLab should use !N for MRs: {body}");
-        assert!(!body.contains("#1"), "GitLab should NOT use #N: {body}");
-        assert!(!body.contains("#2"), "GitLab should NOT use #N: {body}");
-
-        // Should have full URLs
-        assert!(
-            body.contains("https://gitlab.com/test/test/-/merge_requests/1"),
-            "GitLab should include full URLs: {body}"
-        );
-
-        // Current PR should have marker
-        assert!(
-            body.contains(&format!(
-                "!2]({}) {STACK_COMMENT_THIS_PR}",
-                "https://gitlab.com/test/test/-/merge_requests/2"
-            )),
-            "Current PR should have marker: {body}"
-        );
-    }
-
-    #[test]
-    fn test_format_stack_comment_github_uses_hash() {
-        let data = StackCommentData {
-            version: 1,
-            stack: vec![StackItem {
-                bookmark_name: "feat-a".to_string(),
-                pr_url: "https://github.com/test/test/pull/1".to_string(),
-                pr_number: 1,
-                pr_title: "feat: add auth".to_string(),
-            }],
-            base_branch: "main".to_string(),
-        };
-
-        // GitHub format should use #N without URLs in the visible text
-        let body = format_stack_comment_for_platform(&data, 0, Platform::GitHub).unwrap();
-
-        assert!(body.contains("#1"), "GitHub should use #N: {body}");
-        assert!(!body.contains("!1"), "GitHub should NOT use !N: {body}");
-        // GitHub format doesn't include PR URLs in visible text (relies on auto-linking)
-        assert!(
-            !body.contains("](https://github.com/test/test/pull"),
-            "GitHub should NOT have markdown links to PRs: {body}"
-        );
     }
 
     // === Plan helper tests ===

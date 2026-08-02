@@ -151,7 +151,7 @@ pub enum ExecutionConstraint {
     },
 
     /// Create parent PR before child PR.
-    /// Parent PR must exist so stack comments can reference its number/URL.
+    /// Parent PR must exist before the child's base update and stack registration.
     CreateOrder {
         /// Parent PR (created first)
         parent: CreateRef,
@@ -264,7 +264,7 @@ struct ExecutionNode {
 /// Submission plan
 #[derive(Debug, Clone)]
 pub struct SubmissionPlan {
-    /// Segments to submit (used for stack comment generation)
+    /// Segments to submit (used for stack registration)
     pub segments: Vec<NarrowedBookmarkSegment>,
     /// Dependency constraints between operations (for debugging/dry-run display)
     pub constraints: Vec<ExecutionConstraint>,

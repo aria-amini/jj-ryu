@@ -8,7 +8,10 @@
 use async_trait::async_trait;
 use jj_ryu::error::{Error, Result};
 use jj_ryu::platform::PlatformService;
-use jj_ryu::types::{PlatformConfig, PrComment, PullRequest};
+use jj_ryu::types::{
+    MergeAsyncOutcome, MergeAsyncState, MergeOptions, Platform, PlatformConfig, PrStack,
+    PrStackEntry, PrStackHead, PullRequest, StackRef,
+};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -28,11 +31,11 @@ pub struct UpdateBaseCall {
     pub new_base: String,
 }
 
-/// Call record for `create_pr_comment`
+/// Call record for `add_to_stack`
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreateCommentCall {
-    pub pr_number: u64,
-    pub body: String,
+pub struct AddToStackCall {
+    pub stack_number: u64,
+    pub pull_requests: Vec<u64>,
 }
 
 /// Simple mock platform service for testing
@@ -48,18 +51,27 @@ pub struct CreateCommentCall {
 pub struct MockPlatformService {
     config: PlatformConfig,
     next_pr_number: AtomicU64,
+    next_stack_number: AtomicU64,
     find_pr_responses: Mutex<HashMap<String, Option<PullRequest>>>,
-    list_comments_responses: Mutex<HashMap<u64, Vec<PrComment>>>,
+    find_stack_responses: Mutex<HashMap<u64, Option<PrStack>>>,
     // Call tracking
     find_pr_calls: Mutex<Vec<String>>,
     create_pr_calls: Mutex<Vec<CreatePrCall>>,
     update_base_calls: Mutex<Vec<UpdateBaseCall>>,
-    create_comment_calls: Mutex<Vec<CreateCommentCall>>,
-    list_comments_calls: Mutex<Vec<u64>>,
+    find_stack_calls: Mutex<Vec<u64>>,
+    create_stack_calls: Mutex<Vec<Vec<u64>>>,
+    add_to_stack_calls: Mutex<Vec<AddToStackCall>>,
+    unstack_calls: Mutex<Vec<u64>>,
+    merge_calls: Mutex<Vec<u64>>,
     // Error injection
     error_on_find_pr: Mutex<Option<String>>,
     error_on_create_pr: Mutex<Option<String>>,
     error_on_update_base: Mutex<Option<String>>,
+    error_on_find_stack: Mutex<Option<String>>,
+    error_on_create_stack: Mutex<Option<String>>,
+    error_on_add_to_stack: Mutex<Option<String>>,
+    // Number of times `add_to_stack` returns StackConflict before succeeding
+    conflict_add_to_stack: Mutex<usize>,
 }
 
 impl MockPlatformService {
@@ -68,16 +80,24 @@ impl MockPlatformService {
         Self {
             config,
             next_pr_number: AtomicU64::new(1),
+            next_stack_number: AtomicU64::new(1),
             find_pr_responses: Mutex::new(HashMap::new()),
-            list_comments_responses: Mutex::new(HashMap::new()),
+            find_stack_responses: Mutex::new(HashMap::new()),
             find_pr_calls: Mutex::new(Vec::new()),
             create_pr_calls: Mutex::new(Vec::new()),
             update_base_calls: Mutex::new(Vec::new()),
-            create_comment_calls: Mutex::new(Vec::new()),
-            list_comments_calls: Mutex::new(Vec::new()),
+            find_stack_calls: Mutex::new(Vec::new()),
+            create_stack_calls: Mutex::new(Vec::new()),
+            add_to_stack_calls: Mutex::new(Vec::new()),
+            unstack_calls: Mutex::new(Vec::new()),
+            merge_calls: Mutex::new(Vec::new()),
             error_on_find_pr: Mutex::new(None),
             error_on_create_pr: Mutex::new(None),
             error_on_update_base: Mutex::new(None),
+            error_on_find_stack: Mutex::new(None),
+            error_on_create_stack: Mutex::new(None),
+            error_on_add_to_stack: Mutex::new(None),
+            conflict_add_to_stack: Mutex::new(0),
         }
     }
 
@@ -98,6 +118,31 @@ impl MockPlatformService {
         *self.error_on_update_base.lock().unwrap() = Some(msg.to_string());
     }
 
+    /// Make `find_stack_for_pr` return an error
+    pub fn fail_find_stack(&self, msg: &str) {
+        *self.error_on_find_stack.lock().unwrap() = Some(msg.to_string());
+    }
+
+    /// Make `find_stack_for_pr` report stacks as unavailable
+    pub fn stacks_unavailable(&self) {
+        *self.error_on_find_stack.lock().unwrap() = Some("__unavailable__".to_string());
+    }
+
+    /// Make `create_stack` return an error
+    pub fn fail_create_stack(&self, msg: &str) {
+        *self.error_on_create_stack.lock().unwrap() = Some(msg.to_string());
+    }
+
+    /// Make `add_to_stack` return an error
+    pub fn fail_add_to_stack(&self, msg: &str) {
+        *self.error_on_add_to_stack.lock().unwrap() = Some(msg.to_string());
+    }
+
+    /// Make `add_to_stack` fail with `StackConflict` `times` times before succeeding
+    pub fn conflict_add_to_stack(&self, times: usize) {
+        *self.conflict_add_to_stack.lock().unwrap() = times;
+    }
+
     /// Set the response for `find_existing_pr` for a specific branch
     pub fn set_find_pr_response(&self, branch: &str, pr: Option<PullRequest>) {
         self.find_pr_responses
@@ -106,12 +151,12 @@ impl MockPlatformService {
             .insert(branch.to_string(), pr);
     }
 
-    /// Set the response for `list_pr_comments` for a specific PR
-    pub fn set_list_comments_response(&self, pr_number: u64, comments: Vec<PrComment>) {
-        self.list_comments_responses
+    /// Set the stack returned by `find_stack_for_pr` for a specific PR
+    pub fn set_stack_for_pr(&self, pr_number: u64, stack: Option<PrStack>) {
+        self.find_stack_responses
             .lock()
             .unwrap()
-            .insert(pr_number, comments);
+            .insert(pr_number, stack);
     }
 
     // === Call verification methods ===
@@ -131,14 +176,24 @@ impl MockPlatformService {
         self.update_base_calls.lock().unwrap().clone()
     }
 
-    /// Get all `create_pr_comment` calls
-    pub fn get_create_comment_calls(&self) -> Vec<CreateCommentCall> {
-        self.create_comment_calls.lock().unwrap().clone()
+    /// Get all PR numbers `find_stack_for_pr` was called with
+    pub fn get_find_stack_calls(&self) -> Vec<u64> {
+        self.find_stack_calls.lock().unwrap().clone()
     }
 
-    /// Get all `list_pr_comments` calls
-    pub fn get_list_comments_calls(&self) -> Vec<u64> {
-        self.list_comments_calls.lock().unwrap().clone()
+    /// Get all `create_stack` calls
+    pub fn get_create_stack_calls(&self) -> Vec<Vec<u64>> {
+        self.create_stack_calls.lock().unwrap().clone()
+    }
+
+    /// Get all `add_to_stack` calls
+    pub fn get_add_to_stack_calls(&self) -> Vec<AddToStackCall> {
+        self.add_to_stack_calls.lock().unwrap().clone()
+    }
+
+    /// Get all `unstack` calls
+    pub fn get_unstack_calls(&self) -> Vec<u64> {
+        self.unstack_calls.lock().unwrap().clone()
     }
 
     /// Assert that `create_pr` was called with specific head and base
@@ -170,6 +225,34 @@ impl MockPlatformService {
                 "Expected find_existing_pr({branch}) but got: {calls:?}"
             );
         }
+    }
+}
+
+/// Build a mock stack from PR numbers (bottom to top)
+pub fn make_stack(number: u64, pr_numbers: &[u64]) -> PrStack {
+    PrStack {
+        id: number * 1000,
+        number,
+        node_id: Some(format!("STACK_node_{number}")),
+        url: format!("https://api.github.com/repos/test/repo/stacks/{number}"),
+        base: StackRef {
+            ref_field: "main".to_string(),
+        },
+        open: true,
+        created_at: None,
+        pull_requests: pr_numbers
+            .iter()
+            .map(|n| PrStackEntry {
+                number: *n,
+                state: "open".to_string(),
+                draft: false,
+                merged_at: None,
+                head: PrStackHead {
+                    ref_field: format!("feat-{n}"),
+                    sha: format!("sha_{n}"),
+                },
+            })
+            .collect(),
     }
 }
 
@@ -243,32 +326,6 @@ impl PlatformService for MockPlatformService {
         })
     }
 
-    async fn list_pr_comments(&self, pr_number: u64) -> Result<Vec<PrComment>> {
-        self.list_comments_calls.lock().unwrap().push(pr_number);
-        let responses = self.list_comments_responses.lock().unwrap();
-        Ok(responses.get(&pr_number).cloned().unwrap_or_default())
-    }
-
-    async fn create_pr_comment(&self, pr_number: u64, body: &str) -> Result<()> {
-        self.create_comment_calls
-            .lock()
-            .unwrap()
-            .push(CreateCommentCall {
-                pr_number,
-                body: body.to_string(),
-            });
-        Ok(())
-    }
-
-    async fn update_pr_comment(
-        &self,
-        _pr_number: u64,
-        _comment_id: u64,
-        _body: &str,
-    ) -> Result<()> {
-        Ok(())
-    }
-
     async fn publish_pr(&self, pr_number: u64) -> Result<PullRequest> {
         Ok(PullRequest {
             number: pr_number,
@@ -279,6 +336,95 @@ impl PlatformService for MockPlatformService {
             node_id: Some(format!("PR_node_{pr_number}")),
             is_draft: false, // After publishing, is_draft is false
         })
+    }
+
+    fn supports_native_stacks(&self) -> bool {
+        self.config.platform == Platform::GitHub
+    }
+
+    async fn find_stack_for_pr(&self, pr_number: u64) -> Result<Option<PrStack>> {
+        self.find_stack_calls.lock().unwrap().push(pr_number);
+
+        if let Some(msg) = self.error_on_find_stack.lock().unwrap().as_ref() {
+            if msg == "__unavailable__" {
+                return Err(Error::StacksUnavailable(
+                    "stacks endpoint not available".to_string(),
+                ));
+            }
+            return Err(Error::Platform(msg.clone()));
+        }
+
+        let responses = self.find_stack_responses.lock().unwrap();
+        Ok(responses.get(&pr_number).cloned().flatten())
+    }
+
+    async fn create_stack(&self, pull_requests: &[u64]) -> Result<PrStack> {
+        self.create_stack_calls
+            .lock()
+            .unwrap()
+            .push(pull_requests.to_vec());
+
+        if let Some(msg) = self.error_on_create_stack.lock().unwrap().as_ref() {
+            return Err(Error::Platform(msg.clone()));
+        }
+
+        let number = self.next_stack_number.fetch_add(1, Ordering::SeqCst);
+        Ok(make_stack(number, pull_requests))
+    }
+
+    async fn add_to_stack(&self, stack_number: u64, pull_requests: &[u64]) -> Result<PrStack> {
+        self.add_to_stack_calls
+            .lock()
+            .unwrap()
+            .push(AddToStackCall {
+                stack_number,
+                pull_requests: pull_requests.to_vec(),
+            });
+
+        if let Some(msg) = self.error_on_add_to_stack.lock().unwrap().as_ref() {
+            return Err(Error::Platform(msg.clone()));
+        }
+
+        let should_conflict = {
+            let mut remaining = self.conflict_add_to_stack.lock().unwrap();
+            if *remaining > 0 {
+                *remaining -= 1;
+                true
+            } else {
+                false
+            }
+        };
+        if should_conflict {
+            return Err(Error::StackConflict(
+                "stack being modified by another request".to_string(),
+            ));
+        }
+
+        Ok(make_stack(stack_number, pull_requests))
+    }
+
+    async fn unstack(&self, stack_number: u64) -> Result<Option<PrStack>> {
+        self.unstack_calls.lock().unwrap().push(stack_number);
+        Ok(None)
+    }
+
+    async fn merge_pr_async(
+        &self,
+        pr_number: u64,
+        _options: &MergeOptions,
+    ) -> Result<MergeAsyncOutcome> {
+        self.merge_calls.lock().unwrap().push(pr_number);
+        Ok(MergeAsyncOutcome::Accepted {
+            uuid: "mock-uuid".to_string(),
+        })
+    }
+
+    async fn poll_merge_async(
+        &self,
+        _pr_number: u64,
+        _uuid: &str,
+    ) -> Result<MergeAsyncState> {
+        Ok(MergeAsyncState::Merged)
     }
 
     fn config(&self) -> &PlatformConfig {

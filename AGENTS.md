@@ -14,7 +14,7 @@ src/
 ├── lib.rs          # Library crate, public API
 ├── cli/            # CLI-only (not exported from lib)
 ├── submit/         # 3-phase engine: analysis → plan → execute (see AGENTS.md)
-├── platform/       # PlatformService trait + GitHub/GitLab impls
+├── platform/       # PlatformService trait + GitHub (github/ incl. Stacks API) /GitLab impls
 ├── graph/          # ChangeGraph builder from jj workspace
 ├── repo/           # JjWorkspace wrapper, revset resolution, trunk() alias
 ├── auth/           # Token retrieval (gh/glab CLI integration)
@@ -37,7 +37,8 @@ npm/                      # Cross-platform binary distribution
 |------|----------|-------|
 | Add CLI flag | `src/main.rs` | clap derives, then wire to `src/cli/` |
 | New platform | `src/platform/` | Impl `PlatformService` trait |
-| PR creation logic | `src/submit/execute.rs` | Stack comments, base updates |
+| PR creation logic | `src/submit/execute.rs` | Base updates |
+| Native stack registration | `src/submit/stack_register.rs` | GitHub Stacks API upsert, soft-fail |
 | Graph traversal | `src/graph/builder.rs` | jj revsets, adjacency building |
 | Auth flow | `src/auth/{github,gitlab}.rs` | Shells to gh/glab CLI |
 | Execution ordering | `src/submit/plan.rs` | Typed constraints, topo sort |
@@ -52,7 +53,8 @@ npm/                      # Cross-platform binary distribution
 **Three-phase submission** (see `src/submit/AGENTS.md`):
 1. `analysis.rs` - Build `ChangeGraph`, find bookmarks to submit
 2. `plan.rs` - Determine `SubmissionPlan` with typed constraints + topo sort
-3. `execute.rs` - Push branches, create/update PRs, manage stack comments
+3. `execute.rs` - Push branches, create/update PRs
+4. `stack_register.rs` - Register PRs as a native GitHub stack (soft-fail, never fatal)
 
 **Execution Step Model** (RFC: `docs/rfcs/rfc-execution-step-model.md`):
 - `ExecutionStep` enum: `Push`, `UpdateBase`, `CreatePr`, `PublishPr`

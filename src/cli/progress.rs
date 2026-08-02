@@ -37,7 +37,7 @@ impl ProgressCallback for CliProgress {
             println!("{}...", phase.to_string().emphasis());
         } else {
             match phase {
-                Phase::Executing | Phase::AddingComments => {
+                Phase::Executing | Phase::RegisteringStack => {
                     println!("  {}...", phase.to_string().muted());
                 }
                 _ => {}

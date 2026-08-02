@@ -12,8 +12,10 @@ pub use factory::create_platform_service;
 pub use github::GitHubService;
 pub use gitlab::GitLabService;
 
-use crate::error::Result;
-use crate::types::{PlatformConfig, PrComment, PullRequest};
+use crate::error::{Error, Result};
+use crate::types::{
+    MergeAsyncOutcome, MergeAsyncState, MergeOptions, PlatformConfig, PrStack, PullRequest,
+};
 use async_trait::async_trait;
 
 /// Platform service trait for PR/MR operations
@@ -56,14 +58,68 @@ pub trait PlatformService: Send + Sync {
     /// Publish a draft PR (convert to ready for review)
     async fn publish_pr(&self, pr_number: u64) -> Result<PullRequest>;
 
-    /// List comments on a PR
-    async fn list_pr_comments(&self, pr_number: u64) -> Result<Vec<PrComment>>;
+    /// Whether the platform supports native stacked PRs (GitHub Stacks API)
+    fn supports_native_stacks(&self) -> bool {
+        false
+    }
 
-    /// Create a comment on a PR
-    async fn create_pr_comment(&self, pr_number: u64, body: &str) -> Result<()>;
+    /// Find the native stack containing a PR (None if the PR is not stacked)
+    async fn find_stack_for_pr(&self, pr_number: u64) -> Result<Option<PrStack>> {
+        let _ = pr_number;
+        Err(Error::Unsupported {
+            feature: "native stacks",
+            platform: self.config().platform,
+        })
+    }
 
-    /// Update an existing comment on a PR
-    async fn update_pr_comment(&self, pr_number: u64, comment_id: u64, body: &str) -> Result<()>;
+    /// Create a native stack from PRs ordered bottom to top (min 2)
+    async fn create_stack(&self, pull_requests: &[u64]) -> Result<PrStack> {
+        let _ = pull_requests;
+        Err(Error::Unsupported {
+            feature: "native stacks",
+            platform: self.config().platform,
+        })
+    }
+
+    /// Append PRs to the top of an existing native stack
+    async fn add_to_stack(&self, stack_number: u64, pull_requests: &[u64]) -> Result<PrStack> {
+        let _ = (stack_number, pull_requests);
+        Err(Error::Unsupported {
+            feature: "native stacks",
+            platform: self.config().platform,
+        })
+    }
+
+    /// Remove all unmerged PRs from a native stack (None = stack dissolved)
+    async fn unstack(&self, stack_number: u64) -> Result<Option<PrStack>> {
+        let _ = stack_number;
+        Err(Error::Unsupported {
+            feature: "native stacks",
+            platform: self.config().platform,
+        })
+    }
+
+    /// Request an async merge of a stacked PR (merges it and all PRs below it)
+    async fn merge_pr_async(
+        &self,
+        pr_number: u64,
+        options: &MergeOptions,
+    ) -> Result<MergeAsyncOutcome> {
+        let _ = (pr_number, options);
+        Err(Error::Unsupported {
+            feature: "async merge",
+            platform: self.config().platform,
+        })
+    }
+
+    /// Poll the status of an async merge
+    async fn poll_merge_async(&self, pr_number: u64, uuid: &str) -> Result<MergeAsyncState> {
+        let _ = (pr_number, uuid);
+        Err(Error::Unsupported {
+            feature: "async merge",
+            platform: self.config().platform,
+        })
+    }
 
     /// Get the platform configuration
     fn config(&self) -> &PlatformConfig;

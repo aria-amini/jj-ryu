@@ -1,5 +1,8 @@
 # PRD: Enhanced Stack Comments
 
+> **Status: Superseded (2026-08)** — stack navigation comments were removed in favor of
+> native GitHub Stacks registration. See `20260802-rfc-native-github-stacks.md`.
+
 **Status:** Draft  
 **Author:** OpenCode  
 **Date:** 2026-01-07  

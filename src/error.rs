@@ -3,6 +3,7 @@
 //! Uses thiserror for structured errors that can be mapped to HTTP status codes
 //! in future web server implementations.
 
+use crate::types::Platform;
 use thiserror::Error;
 
 /// Main error type for jj-ryu operations
@@ -83,6 +84,31 @@ pub enum Error {
     /// Platform API error (generic)
     #[error("platform error: {0}")]
     Platform(String),
+
+    /// GitHub stacked PRs feature unavailable (not rolled out, or GHES without support)
+    #[error("GitHub stacked PRs unavailable: {0}")]
+    StacksUnavailable(String),
+
+    /// Native stack not found (dissolved or never existed)
+    #[error("stack not found: {0}")]
+    StackNotFound(String),
+
+    /// Stack concurrently modified (HTTP 409)
+    #[error("stack concurrently modified: {0}")]
+    StackConflict(String),
+
+    /// Another merge is already enqueued for this stack (HTTP 409)
+    #[error("merge already in progress: {0}")]
+    MergeInProgress(String),
+
+    /// Feature not supported on this platform
+    #[error("feature not supported on {platform}: {feature}")]
+    Unsupported {
+        /// The unsupported feature
+        feature: &'static str,
+        /// The platform lacking support
+        platform: Platform,
+    },
 
     /// Internal error (unexpected state)
     #[error("internal error: {0}")]

@@ -9,7 +9,6 @@
 //! Run with: `JJ_RYU_E2E_TESTS=1 cargo test --test e2e_tests -- --include-ignored`
 
 use jj_ryu::platform::{GitHubService, PlatformService};
-use jj_ryu::submit::STACK_COMMENT_THIS_PR;
 use jj_ryu::types::Platform;
 use std::env;
 use std::path::PathBuf;
@@ -239,7 +238,7 @@ impl E2ERepo {
             .current_dir(self.path())
             .output();
 
-        if !new_output.map(|o| o.status.success()).unwrap_or(false) {
+        if !new_output.is_ok_and(|o| o.status.success()) {
             return false;
         }
 
@@ -256,7 +255,7 @@ impl E2ERepo {
             .current_dir(self.path())
             .output();
 
-        squash.map(|o| o.status.success()).unwrap_or(false)
+        squash.is_ok_and(|o| o.status.success())
     }
 
     /// Create a bookmark at current commit
@@ -267,7 +266,7 @@ impl E2ERepo {
             .current_dir(self.path())
             .output();
 
-        if output.map(|o| o.status.success()).unwrap_or(false) {
+        if output.is_ok_and(|o| o.status.success()) {
             self.created_bookmarks.push(full_name);
             true
         } else {
@@ -415,26 +414,6 @@ fn get_pr_base(pr_number: u64) -> Option<String> {
     )
 }
 
-fn get_pr_comments(pr_number: u64) -> Vec<String> {
-    // Use JSON array output to handle multi-line comment bodies correctly
-    let output = Command::new("gh")
-        .args([
-            "api",
-            &format!("repos/{}/issues/{pr_number}/comments", repo_spec()),
-            "--jq",
-            "[.[].body]",
-        ])
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            let json_str = String::from_utf8_lossy(&o.stdout);
-            serde_json::from_str::<Vec<String>>(&json_str).unwrap_or_default()
-        }
-        _ => vec![],
-    }
-}
-
 fn merge_pr(pr_number: u64) -> bool {
     let output = Command::new("gh")
         .args([
@@ -448,7 +427,7 @@ fn merge_pr(pr_number: u64) -> bool {
         ])
         .output();
 
-    output.map(|o| o.status.success()).unwrap_or(false)
+    output.is_ok_and(|o| o.status.success())
 }
 
 /// Get PR state (OPEN, MERGED, CLOSED)
@@ -627,51 +606,6 @@ async fn test_update_pr_base() {
 
 #[tokio::test]
 #[ignore = "E2E test requiring JJ_RYU_E2E_TESTS=1"]
-async fn test_pr_comments() {
-    let Some(mut ctx) = TestContext::new() else {
-        eprintln!("Skipping: set JJ_RYU_E2E_TESTS=1");
-        return;
-    };
-
-    let branch = unique_branch("comments");
-    ctx.track_branch(&branch);
-
-    assert!(ctx.push_branch(&branch, "comment test"));
-
-    let pr = ctx
-        .service
-        .create_pr(&branch, "main", "Comment test")
-        .await
-        .expect("create PR");
-    ctx.track_pr(pr.number);
-
-    ctx.service
-        .create_pr_comment(pr.number, "E2E test comment")
-        .await
-        .expect("create comment");
-
-    let comments = ctx
-        .service
-        .list_pr_comments(pr.number)
-        .await
-        .expect("list comments");
-
-    assert!(!comments.is_empty());
-    assert_eq!(comments[0].body, "E2E test comment");
-
-    ctx.service
-        .update_pr_comment(pr.number, comments[0].id, "Updated")
-        .await
-        .expect("update comment");
-
-    let comments = ctx.service.list_pr_comments(pr.number).await.unwrap();
-    assert_eq!(comments[0].body, "Updated");
-
-    ctx.cleanup();
-}
-
-#[tokio::test]
-#[ignore = "E2E test requiring JJ_RYU_E2E_TESTS=1"]
 async fn test_pr_stack_rebase() {
     let Some(mut ctx) = TestContext::new() else {
         eprintln!("Skipping: set JJ_RYU_E2E_TESTS=1");
@@ -825,73 +759,6 @@ async fn test_submit_idempotent() {
     // Same PR number (not duplicated)
     let pr_num2 = find_pr_number(&bookmarks[0]).expect("PR should still exist");
     assert_eq!(pr_num, pr_num2);
-
-    repo.cleanup();
-}
-
-#[tokio::test]
-#[ignore = "E2E test requiring JJ_RYU_E2E_TESTS=1"]
-async fn test_stack_comments() {
-    let Some(mut repo) = E2ERepo::new() else {
-        eprintln!("Skipping: set JJ_RYU_E2E_TESTS=1");
-        return;
-    };
-
-    // Create 3-level stack
-    let bookmarks = repo.build_stack(&[
-        ("stack-1", "First"),
-        ("stack-2", "Second"),
-        ("stack-3", "Third"),
-    ]);
-
-    let output = repo.submit(&bookmarks[2]);
-    assert!(
-        output.status.success(),
-        "submit failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // Collect PR numbers for all bookmarks
-    let pr_numbers: Vec<u64> = bookmarks
-        .iter()
-        .map(|b| find_pr_number(b).expect("PR should exist"))
-        .collect();
-
-    // Check stack comments on each PR
-    for (i, _bookmark) in bookmarks.iter().enumerate() {
-        let pr_num = pr_numbers[i];
-        let comments = get_pr_comments(pr_num);
-
-        // Must have stack comment with JJ-RYU marker
-        let stack_comment = comments
-            .iter()
-            .find(|c| c.contains("<!--- JJ-RYU_STACK:"))
-            .unwrap_or_else(|| panic!("PR #{pr_num} missing JJ-RYU stack comment"));
-
-        // All PRs in stack should be referenced
-        for &other_pr in &pr_numbers {
-            assert!(
-                stack_comment.contains(&format!("#{other_pr}")),
-                "Stack comment on PR #{pr_num} missing reference to #{other_pr}"
-            );
-        }
-
-        // Current PR must have marker
-        assert!(
-            stack_comment.contains(&format!("#{pr_num} {STACK_COMMENT_THIS_PR}")),
-            "PR #{pr_num} missing {STACK_COMMENT_THIS_PR} marker for current position. Comment: {stack_comment}"
-        );
-
-        // Other PRs should NOT have marker
-        for (j, &other_pr) in pr_numbers.iter().enumerate() {
-            if j != i {
-                assert!(
-                    !stack_comment.contains(&format!("#{other_pr} {STACK_COMMENT_THIS_PR}")),
-                    "PR #{other_pr} incorrectly has {STACK_COMMENT_THIS_PR} marker on PR #{pr_num}'s comment"
-                );
-            }
-        }
-    }
 
     repo.cleanup();
 }

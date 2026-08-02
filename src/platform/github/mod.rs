@@ -1,12 +1,21 @@
 //! GitHub platform service implementation
 
+mod stacks;
+
 use crate::error::{Error, Result};
 use crate::platform::PlatformService;
-use crate::types::{Platform, PlatformConfig, PrComment, PullRequest};
+use crate::types::{
+    MergeAsyncOutcome, MergeAsyncState, MergeOptions, Platform, PlatformConfig, PrStack,
+    PullRequest,
+};
 use async_trait::async_trait;
 use octocrab::Octocrab;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Deserialize;
 use tracing::debug;
+
+/// GitHub REST API version pinned for the stacked PRs preview
+const GITHUB_API_VERSION: &str = "2026-03-10";
 
 // GraphQL response types for publish_pr mutation
 
@@ -62,6 +71,10 @@ impl From<GraphQlPullRequest> for PullRequest {
 /// GitHub service using octocrab
 pub struct GitHubService {
     client: Octocrab,
+    /// Raw HTTP client for the Stacks API (status-code sensitive endpoints)
+    stacks_http: reqwest::Client,
+    /// REST API base URL (e.g. `https://api.github.com` or `https://host/api/v3`)
+    api_base: String,
     config: PlatformConfig,
 }
 
@@ -69,6 +82,12 @@ impl GitHubService {
     /// Create a new GitHub service
     pub fn new(token: &str, owner: String, repo: String, host: Option<String>) -> Result<Self> {
         let mut builder = Octocrab::builder().personal_token(token.to_string());
+
+        let api_base = host
+            .as_ref()
+            .map_or_else(|| "https://api.github.com".to_string(), |h| {
+                format!("https://{h}/api/v3")
+            });
 
         if let Some(ref h) = host {
             let base_url = format!("https://{h}/api/v3");
@@ -81,8 +100,31 @@ impl GitHubService {
             .build()
             .map_err(|e| Error::GitHubApi(e.to_string()))?;
 
+        let mut headers = HeaderMap::new();
+        let mut auth = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|e| Error::GitHubApi(format!("invalid token: {e}")))?;
+        auth.set_sensitive(true);
+        headers.insert(AUTHORIZATION, auth);
+        headers.insert(USER_AGENT, HeaderValue::from_static("jj-ryu"));
+        headers.insert(
+            "x-github-api-version",
+            HeaderValue::from_static(GITHUB_API_VERSION),
+        );
+        headers.insert(
+            "accept",
+            HeaderValue::from_static("application/vnd.github+json"),
+        );
+
+        let stacks_http = reqwest::Client::builder()
+            .default_headers(headers)
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| Error::GitHubApi(format!("failed to create HTTP client: {e}")))?;
+
         Ok(Self {
             client,
+            stacks_http,
+            api_base,
             config: PlatformConfig {
                 platform: Platform::GitHub,
                 owner,
@@ -90,6 +132,14 @@ impl GitHubService {
                 host,
             },
         })
+    }
+
+    /// Base route for this repo's API endpoints
+    pub(crate) fn repo_route(&self) -> String {
+        format!(
+            "{}/repos/{}/{}",
+            self.api_base, self.config.owner, self.config.repo
+        )
     }
 }
 
@@ -114,7 +164,7 @@ fn pr_from_octocrab(pr: &octocrab::models::pulls::PullRequest) -> PullRequest {
 impl PlatformService for GitHubService {
     async fn find_existing_pr(&self, head_branch: &str) -> Result<Option<PullRequest>> {
         debug!(head_branch, "finding existing PR");
-        let head = format!("{}:{}", &self.config.owner, head_branch);
+        let head = format!("{}:{head_branch}", self.config.owner);
 
         let prs = self
             .client
@@ -228,45 +278,36 @@ impl PlatformService for GitHubService {
         Ok(data.mark_pull_request_ready_for_review.pull_request.into())
     }
 
-    async fn list_pr_comments(&self, pr_number: u64) -> Result<Vec<PrComment>> {
-        debug!(pr_number, "listing PR comments");
-        let comments = self
-            .client
-            .issues(&self.config.owner, &self.config.repo)
-            .list_comments(pr_number)
-            .send()
-            .await?;
-
-        let result: Vec<PrComment> = comments
-            .items
-            .into_iter()
-            .map(|c| PrComment {
-                id: c.id.0,
-                body: c.body.unwrap_or_default(),
-            })
-            .collect();
-        debug!(pr_number, count = result.len(), "listed PR comments");
-        Ok(result)
+    fn supports_native_stacks(&self) -> bool {
+        true
     }
 
-    async fn create_pr_comment(&self, pr_number: u64, body: &str) -> Result<()> {
-        debug!(pr_number, "creating PR comment");
-        self.client
-            .issues(&self.config.owner, &self.config.repo)
-            .create_comment(pr_number, body)
-            .await?;
-        debug!(pr_number, "created PR comment");
-        Ok(())
+    async fn find_stack_for_pr(&self, pr_number: u64) -> Result<Option<PrStack>> {
+        self.stacks_find_for_pr(pr_number).await
     }
 
-    async fn update_pr_comment(&self, _pr_number: u64, comment_id: u64, body: &str) -> Result<()> {
-        debug!(comment_id, "updating PR comment");
-        self.client
-            .issues(&self.config.owner, &self.config.repo)
-            .update_comment(octocrab::models::CommentId(comment_id), body)
-            .await?;
-        debug!(comment_id, "updated PR comment");
-        Ok(())
+    async fn create_stack(&self, pull_requests: &[u64]) -> Result<PrStack> {
+        self.stacks_create(pull_requests).await
+    }
+
+    async fn add_to_stack(&self, stack_number: u64, pull_requests: &[u64]) -> Result<PrStack> {
+        self.stacks_add(stack_number, pull_requests).await
+    }
+
+    async fn unstack(&self, stack_number: u64) -> Result<Option<PrStack>> {
+        self.stacks_unstack(stack_number).await
+    }
+
+    async fn merge_pr_async(
+        &self,
+        pr_number: u64,
+        options: &MergeOptions,
+    ) -> Result<MergeAsyncOutcome> {
+        self.stacks_merge_async(pr_number, options).await
+    }
+
+    async fn poll_merge_async(&self, pr_number: u64, uuid: &str) -> Result<MergeAsyncState> {
+        self.stacks_poll_merge_async(pr_number, uuid).await
     }
 
     fn config(&self) -> &PlatformConfig {

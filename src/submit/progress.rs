@@ -16,8 +16,8 @@ pub enum Phase {
     Planning,
     /// Executing submission operations (push, create, update, publish)
     Executing,
-    /// Adding/updating stack comments
-    AddingComments,
+    /// Registering PRs as a native GitHub stack
+    RegisteringStack,
     /// Submission complete
     Complete,
 }
@@ -28,7 +28,7 @@ impl std::fmt::Display for Phase {
             Self::Analyzing => write!(f, "Analyzing"),
             Self::Planning => write!(f, "Planning"),
             Self::Executing => write!(f, "Executing"),
-            Self::AddingComments => write!(f, "Updating stack comments"),
+            Self::RegisteringStack => write!(f, "Registering stack"),
             Self::Complete => write!(f, "Done"),
         }
     }

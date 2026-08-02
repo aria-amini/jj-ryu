@@ -129,18 +129,9 @@ Tracking state is stored in `.jj/ryu/tracking.json` per workspace.
 ryu submit
 ```
 
-This pushes all tracked bookmarks in the current stack, creates PRs for any without one, updates PR base branches, and adds stack navigation comments. Untracked bookmarks are skipped with a warning.
+This pushes all tracked bookmarks in the current stack, creates PRs for any without one, updates PR base branches, and registers them as a native [GitHub stack](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs) (on repositories where stacked PRs are available). Untracked bookmarks are skipped with a warning.
 
-Each PR gets a comment showing the full stack:
-
-```
-* #13
-* **#12 👈**
-* #11
-
----
-This stack of pull requests is managed by jj-ryu.
-```
+Registered stacks get GitHub's native stack UI: a stack map in the merge box, layer navigation, and server-side cascading rebases after merges.
 
 ### Syncing
 

@@ -212,15 +212,7 @@ impl TempJjRepo {
             .current_dir(self.dir.path())
             .output();
 
-        self.run_jj(&[
-            "git",
-            "push",
-            "--bookmark",
-            bookmark,
-            "--remote",
-            remote,
-            "--allow-new",
-        ]);
+        self.run_jj(&["git", "push", "--bookmark", bookmark, "--remote", remote]);
     }
 
     /// Create a bare git repository for use as a remote

@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::platform::PlatformService;
-use crate::types::{Platform, PlatformConfig, PrComment, PullRequest};
+use crate::types::{Platform, PlatformConfig, PullRequest};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -26,13 +26,6 @@ struct MergeRequest {
     title: String,
     #[serde(default)]
     draft: bool,
-}
-
-#[derive(Deserialize)]
-struct MrNote {
-    id: u64,
-    body: String,
-    system: bool,
 }
 
 impl From<MergeRequest> for PullRequest {
@@ -217,84 +210,6 @@ impl PlatformService for GitLabService {
 
         debug!(mr_iid = pr_number, "published MR");
         Ok(mr.into())
-    }
-
-    async fn list_pr_comments(&self, pr_number: u64) -> Result<Vec<PrComment>> {
-        debug!(mr_iid = pr_number, "listing MR comments");
-        let url = self.api_url(&format!(
-            "/projects/{}/merge_requests/{}/notes",
-            self.encoded_project(),
-            pr_number
-        ));
-
-        let notes: Vec<MrNote> = self
-            .client
-            .get(&url)
-            .header("PRIVATE-TOKEN", &self.token)
-            .send()
-            .await?
-            .error_for_status()
-            .map_err(|e| Error::GitLabApi(e.to_string()))?
-            .json()
-            .await?;
-
-        let comments: Vec<PrComment> = notes
-            .into_iter()
-            .filter(|n| !n.system)
-            .map(|n| PrComment {
-                id: n.id,
-                body: n.body,
-            })
-            .collect();
-        debug!(
-            mr_iid = pr_number,
-            count = comments.len(),
-            "listed MR comments"
-        );
-        Ok(comments)
-    }
-
-    async fn create_pr_comment(&self, pr_number: u64, body: &str) -> Result<()> {
-        debug!(mr_iid = pr_number, "creating MR comment");
-        let url = self.api_url(&format!(
-            "/projects/{}/merge_requests/{}/notes",
-            self.encoded_project(),
-            pr_number
-        ));
-
-        self.client
-            .post(&url)
-            .header("PRIVATE-TOKEN", &self.token)
-            .json(&serde_json::json!({ "body": body }))
-            .send()
-            .await?
-            .error_for_status()
-            .map_err(|e| Error::GitLabApi(e.to_string()))?;
-
-        debug!(mr_iid = pr_number, "created MR comment");
-        Ok(())
-    }
-
-    async fn update_pr_comment(&self, pr_number: u64, comment_id: u64, body: &str) -> Result<()> {
-        debug!(mr_iid = pr_number, comment_id, "updating MR comment");
-        let url = self.api_url(&format!(
-            "/projects/{}/merge_requests/{}/notes/{}",
-            self.encoded_project(),
-            pr_number,
-            comment_id
-        ));
-
-        self.client
-            .put(&url)
-            .header("PRIVATE-TOKEN", &self.token)
-            .json(&serde_json::json!({ "body": body }))
-            .send()
-            .await?
-            .error_for_status()
-            .map_err(|e| Error::GitLabApi(e.to_string()))?;
-
-        debug!(mr_iid = pr_number, comment_id, "updated MR comment");
-        Ok(())
     }
 
     fn config(&self) -> &PlatformConfig {
