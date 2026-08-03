@@ -51,20 +51,19 @@ pub async fn run_unstack(path: &Path, remote: Option<&str>, yes: bool) -> Result
 
     // The pr_cache can be stale (entries pointing at long-closed PRs), so
     // fall back to resolving tracked bookmarks against the platform
-    let stack = match stack {
-        Some(stack) => Some(stack),
-        None => {
-            let mut found = None;
-            for bookmark in &tracking.bookmarks {
-                if let Ok(Some(pr)) = ctx.platform.find_existing_pr(&bookmark.name).await {
-                    found = find_submitted_stack(ctx.platform.as_ref(), &[pr.number]).await?;
-                    if found.is_some() {
-                        break;
-                    }
+    let stack = if let Some(stack) = stack {
+        Some(stack)
+    } else {
+        let mut found = None;
+        for bookmark in &tracking.bookmarks {
+            if let Ok(Some(pr)) = ctx.platform.find_existing_pr(&bookmark.name).await {
+                found = find_submitted_stack(ctx.platform.as_ref(), &[pr.number]).await?;
+                if found.is_some() {
+                    break;
                 }
             }
-            found
         }
+        found
     };
 
     let Some(stack) = stack else {
