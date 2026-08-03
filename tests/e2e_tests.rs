@@ -19,6 +19,16 @@ use uuid::Uuid;
 const TEST_OWNER: &str = "dmmulroy";
 const TEST_REPO: &str = "jj-ryu-test";
 
+/// Test repo owner (override with `JJ_RYU_E2E_OWNER`)
+fn test_owner() -> String {
+    env::var("JJ_RYU_E2E_OWNER").unwrap_or_else(|_| TEST_OWNER.to_string())
+}
+
+/// Test repo name (override with `JJ_RYU_E2E_REPO`)
+fn test_repo() -> String {
+    env::var("JJ_RYU_E2E_REPO").unwrap_or_else(|_| TEST_REPO.to_string())
+}
+
 /// Check if E2E tests should run
 fn e2e_enabled() -> bool {
     env::var("JJ_RYU_E2E_TESTS").is_ok()
@@ -47,7 +57,7 @@ fn unique_branch(prefix: &str) -> String {
 }
 
 fn repo_spec() -> String {
-    format!("{TEST_OWNER}/{TEST_REPO}")
+    format!("{}/{}", test_owner(), test_repo())
 }
 
 // =============================================================================
@@ -67,7 +77,7 @@ impl TestContext {
         }
 
         let token = get_gh_token()?;
-        let service = GitHubService::new(&token, TEST_OWNER.into(), TEST_REPO.into(), None).ok()?;
+        let service = GitHubService::new(&token, test_owner(), test_repo(), None).ok()?;
 
         Some(Self {
             service,
@@ -485,6 +495,75 @@ fn cleanup_branches_and_prs(branches: &[String], prs: &[u64]) {
             ])
             .output();
     }
+}
+
+// =============================================================================
+// Stacks API Helpers
+// =============================================================================
+
+const STACKS_API_VERSION_HEADER: &str = "X-GitHub-Api-Version: 2026-03-10";
+
+/// Find the native stack containing a PR (returns the stack number)
+fn find_stack_number_for_pr(pr_number: u64) -> Option<u64> {
+    let output = Command::new("gh")
+        .args([
+            "api",
+            &format!("repos/{}/stacks?pull_request={pr_number}", repo_spec()),
+            "-H",
+            STACKS_API_VERSION_HEADER,
+            "--jq",
+            ".[0].number",
+        ])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    } else {
+        None
+    }
+}
+
+/// PR numbers in a native stack, ordered bottom to top
+fn stack_pr_numbers(stack_number: u64) -> Option<Vec<u64>> {
+    let output = Command::new("gh")
+        .args([
+            "api",
+            &format!("repos/{}/stacks/{stack_number}", repo_spec()),
+            "-H",
+            STACKS_API_VERSION_HEADER,
+            "--jq",
+            "[.pull_requests[].number] | join(\" \")",
+        ])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Some(
+            text.split_whitespace()
+                .filter_map(|n| n.parse().ok())
+                .collect(),
+        )
+    } else {
+        None
+    }
+}
+
+/// Unstack a native stack via the API (test cleanup)
+fn unstack_api(stack_number: u64) -> bool {
+    let output = Command::new("gh")
+        .args([
+            "api",
+            "-X",
+            "POST",
+            &format!("repos/{}/stacks/{stack_number}/unstack", repo_spec()),
+            "-H",
+            STACKS_API_VERSION_HEADER,
+        ])
+        .output();
+
+    output.is_ok_and(|o| o.status.success())
 }
 
 // =============================================================================
@@ -1201,5 +1280,136 @@ async fn test_insert_middle_of_stack() {
         "C should now target B after insert"
     );
 
+    repo.cleanup();
+}
+
+// =============================================================================
+// Native GitHub Stacks E2E Tests
+// =============================================================================
+
+#[tokio::test]
+#[ignore = "E2E test requiring JJ_RYU_E2E_TESTS=1"]
+async fn test_submit_registers_native_stack() {
+    let Some(mut repo) = E2ERepo::new() else {
+        eprintln!("Skipping: set JJ_RYU_E2E_TESTS=1");
+        return;
+    };
+
+    let bookmarks = repo.build_stack(&[("feat-a", "Add feature A"), ("feat-b", "Add feature B")]);
+
+    let output = repo.submit(&bookmarks[1]);
+    assert!(
+        output.status.success(),
+        "submit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let pr_a = find_pr_number(&bookmarks[0]).expect("PR for feat-a not found");
+    let pr_b = find_pr_number(&bookmarks[1]).expect("PR for feat-b not found");
+
+    let Some(stack_number) = find_stack_number_for_pr(pr_a) else {
+        panic!("no native stack found for PR #{pr_a} (stacks may be unavailable for this repo)");
+    };
+    assert_eq!(
+        stack_pr_numbers(stack_number),
+        Some(vec![pr_a, pr_b]),
+        "native stack should contain both PRs bottom to top"
+    );
+
+    unstack_api(stack_number);
+    repo.cleanup();
+}
+
+#[tokio::test]
+#[ignore = "E2E test requiring JJ_RYU_E2E_TESTS=1"]
+async fn test_unstack_command() {
+    let Some(mut repo) = E2ERepo::new() else {
+        eprintln!("Skipping: set JJ_RYU_E2E_TESTS=1");
+        return;
+    };
+
+    let bookmarks = repo.build_stack(&[("feat-a", "Add feature A"), ("feat-b", "Add feature B")]);
+
+    let output = repo.submit(&bookmarks[1]);
+    assert!(
+        output.status.success(),
+        "submit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let pr_a = find_pr_number(&bookmarks[0]).expect("PR for feat-a not found");
+    let Some(_stack_number) = find_stack_number_for_pr(pr_a) else {
+        panic!("no native stack found for PR #{pr_a} (stacks may be unavailable for this repo)");
+    };
+
+    let output = repo.run_ryu(&["unstack", "--yes"]);
+    assert!(
+        output.status.success(),
+        "unstack failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        find_stack_number_for_pr(pr_a),
+        None,
+        "stack should be dissolved after ryu unstack"
+    );
+
+    repo.cleanup();
+}
+
+#[tokio::test]
+#[ignore = "E2E test requiring JJ_RYU_E2E_TESTS=1"]
+async fn test_merge_command() {
+    let Some(mut repo) = E2ERepo::new() else {
+        eprintln!("Skipping: set JJ_RYU_E2E_TESTS=1");
+        return;
+    };
+
+    let bookmarks = repo.build_stack(&[("feat-a", "Add feature A"), ("feat-b", "Add feature B")]);
+
+    let output = repo.submit(&bookmarks[1]);
+    assert!(
+        output.status.success(),
+        "submit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let pr_a = find_pr_number(&bookmarks[0]).expect("PR for feat-a not found");
+    let pr_b = find_pr_number(&bookmarks[1]).expect("PR for feat-b not found");
+    assert!(
+        find_stack_number_for_pr(pr_a).is_some(),
+        "no native stack found for PR #{pr_a} (stacks may be unavailable for this repo)"
+    );
+
+    // Merge the bottom layer (squash by default)
+    let output = repo.run_ryu(&["merge", &bookmarks[0], "--yes"]);
+    assert!(
+        output.status.success(),
+        "merge failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        wait_for_pr_merged(pr_a, std::time::Duration::from_secs(60)).await,
+        "feat-a PR should be merged"
+    );
+
+    // GitHub retargets the remaining PR to the stack base
+    let start = std::time::Instant::now();
+    let retargeted = loop {
+        if get_pr_base(pr_b).as_deref() == Some("main") {
+            break true;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(60) {
+            break false;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    };
+    assert!(retargeted, "feat-b PR should be retargeted to main");
+
+    if let Some(stack_number) = find_stack_number_for_pr(pr_b) {
+        unstack_api(stack_number);
+    }
     repo.cleanup();
 }

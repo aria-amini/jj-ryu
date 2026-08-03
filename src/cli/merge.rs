@@ -152,10 +152,7 @@ pub async fn run_merge(
             "GitHub is rebasing the rest of the stack server-side.".muted()
         );
     }
-    println!(
-        "Run {} to update your local stack.",
-        "ryu sync".accent()
-    );
+    println!("Run {} to update your local stack.", "ryu sync".accent());
 
     Ok(())
 }
@@ -176,10 +173,7 @@ async fn resolve_bookmark_pr(
 }
 
 /// Find the bottom unmerged entry of the native stack containing any cached PR
-async fn bottom_unmerged_pr(
-    platform: &dyn PlatformService,
-    pr_cache: &PrCache,
-) -> Result<u64> {
+async fn bottom_unmerged_pr(platform: &dyn PlatformService, pr_cache: &PrCache) -> Result<u64> {
     let pr_numbers: Vec<u64> = pr_cache.prs.iter().map(|p| p.number).collect();
     if pr_numbers.is_empty() {
         return Err(Error::InvalidArgument(
@@ -236,7 +230,10 @@ fn print_merge_plan(plan: &MergePlan) {
             .muted()
         );
         for entry in remaining {
-            println!("{}", format!("  #{} {}", entry.number, entry.head.ref_field).muted());
+            println!(
+                "{}",
+                format!("  #{} {}", entry.number, entry.head.ref_field).muted()
+            );
         }
     }
 }

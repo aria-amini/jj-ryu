@@ -12,7 +12,9 @@ use jj_ryu::repo::{JjWorkspace, select_remote};
 use jj_ryu::submit::{
     SubmissionPlan, analyze_submission, create_submission_plan, execute_submission,
 };
-use jj_ryu::tracking::load_tracking;
+use jj_ryu::sync_merged::{apply_merged_layers, detect_merged_layers};
+use jj_ryu::tracking::{load_pr_cache, load_tracking, save_pr_cache, save_tracking};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -35,8 +37,12 @@ pub async fn run_sync(path: &Path, remote: Option<&str>, options: SyncOptions) -
     let workspace_root = workspace.workspace_root().to_path_buf();
 
     // Load tracking state (unless --all bypasses tracking)
-    let tracking = load_tracking(&workspace_root)?;
-    let tracked_names: Vec<&str> = tracking.tracked_names().into_iter().collect();
+    let mut tracking = load_tracking(&workspace_root)?;
+    let mut tracked_names: Vec<String> = tracking
+        .tracked_names()
+        .into_iter()
+        .map(str::to_string)
+        .collect();
 
     // If no bookmarks tracked and not --all, error
     if tracked_names.is_empty() && !options.all {
@@ -76,6 +82,51 @@ pub async fn run_sync(path: &Path, remote: Option<&str>, options: SyncOptions) -
         ));
     }
 
+    // Drop merged stack layers (native GitHub stacks) before planning
+    let mut pr_cache = load_pr_cache(&workspace_root).unwrap_or_default();
+    let pr_numbers: HashMap<String, u64> = pr_cache
+        .prs
+        .iter()
+        .map(|p| (p.bookmark.clone(), p.number))
+        .collect();
+    let merged = detect_merged_layers(platform.as_ref(), &tracked_names, &pr_numbers).await?;
+
+    if !merged.is_empty() {
+        let names = merged
+            .iter()
+            .map(|m| {
+                m.pr_number
+                    .map_or_else(|| m.bookmark.clone(), |n| format!("{} (#{n})", m.bookmark))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        if options.dry_run {
+            println!(
+                "Would drop {} merged layer{}: {names}",
+                merged.len(),
+                if merged.len() == 1 { "" } else { "s" }
+            );
+        } else {
+            apply_merged_layers(&mut workspace, &mut tracking, &mut pr_cache, &merged)?;
+            save_tracking(&workspace_root, &tracking)?;
+            save_pr_cache(&workspace_root, &pr_cache)?;
+            println!(
+                "{} Dropped {} merged layer{}: {names}",
+                check(),
+                merged.len().to_string().accent(),
+                if merged.len() == 1 { "" } else { "s" }
+            );
+        }
+
+        tracked_names.retain(|name| !merged.iter().any(|m| &m.bookmark == name));
+
+        if tracked_names.is_empty() && !options.all {
+            println!("{}", "Entire stack merged; nothing left to sync.".muted());
+            return Ok(());
+        }
+    }
+
     // Build change graph from working copy
     let graph = build_change_graph(&workspace)?;
 
@@ -98,7 +149,7 @@ pub async fn run_sync(path: &Path, remote: Option<&str>, options: SyncOptions) -
     if !options.all && !tracked_names.is_empty() {
         analysis
             .segments
-            .retain(|s| tracked_names.contains(&s.bookmark.name.as_str()));
+            .retain(|s| tracked_names.iter().any(|n| n == &s.bookmark.name));
         if analysis.segments.is_empty() {
             return Err(Error::Tracking(
                 "No tracked bookmarks in stack. Use 'ryu track' to track bookmarks, or 'ryu sync --all'.".to_string()

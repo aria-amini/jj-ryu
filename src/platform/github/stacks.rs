@@ -7,9 +7,7 @@
 
 use super::GitHubService;
 use crate::error::{Error, Result};
-use crate::types::{
-    MergeAsyncOutcome, MergeAsyncState, MergeOptions, PrStack,
-};
+use crate::types::{MergeAsyncOutcome, MergeAsyncState, MergeOptions, PrStack};
 use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::json;
@@ -95,10 +93,7 @@ impl GitHubService {
         debug!(stack_number, ?pull_requests, "adding PRs to stack");
         let response = self
             .stacks_http
-            .post(format!(
-                "{}/stacks/{stack_number}/add",
-                self.repo_route()
-            ))
+            .post(format!("{}/stacks/{stack_number}/add", self.repo_route()))
             .json(&pr_list_body(pull_requests))
             .send()
             .await?;

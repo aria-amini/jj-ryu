@@ -28,7 +28,10 @@ pub async fn run_unstack(path: &Path, remote: Option<&str>, yes: bool) -> Result
     let pr_cache = load_pr_cache(&ctx.workspace_root).unwrap_or_default();
     let pr_numbers: Vec<u64> = pr_cache.prs.iter().map(|p| p.number).collect();
     if pr_numbers.is_empty() {
-        println!("{}", "No submitted PRs found. Run 'ryu submit' first.".muted());
+        println!(
+            "{}",
+            "No submitted PRs found. Run 'ryu submit' first.".muted()
+        );
         return Ok(());
     }
 
@@ -42,20 +45,14 @@ pub async fn run_unstack(path: &Path, remote: Option<&str>, yes: bool) -> Result
         })?;
 
     let Some(stack) = stack else {
-        println!(
-            "{}",
-            "No submitted PR belongs to a native stack.".muted()
-        );
+        println!("{}", "No submitted PR belongs to a native stack.".muted());
         return Ok(());
     };
 
     print_stack_summary(&stack, &ctx.remote_name);
 
     if !yes {
-        let prompt = format!(
-            "Remove all unmerged PRs from stack #{}?",
-            stack.number
-        );
+        let prompt = format!("Remove all unmerged PRs from stack #{}?", stack.number);
         if !Confirm::new()
             .with_prompt(prompt)
             .default(false)

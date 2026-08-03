@@ -76,9 +76,7 @@ pub async fn poll_merge(
     loop {
         let state = platform.poll_merge_async(pr_number, uuid).await?;
         match state {
-            MergeAsyncState::Pending | MergeAsyncState::Enqueued
-                if start.elapsed() < timeout =>
-            {
+            MergeAsyncState::Pending | MergeAsyncState::Enqueued if start.elapsed() < timeout => {
                 tokio::time::sleep(interval).await;
             }
             _ => return Ok(state),

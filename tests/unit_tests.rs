@@ -697,8 +697,7 @@ mod stack_register_test {
             .map(|pr| (pr.head_ref.clone(), pr))
             .collect();
 
-        let soft =
-            execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
         assert_eq!(soft, None);
         assert_eq!(mock.get_create_stack_calls(), vec![vec![1, 2]]);
     }
@@ -714,8 +713,7 @@ mod stack_register_test {
             .map(|pr| (pr.head_ref.clone(), pr))
             .collect();
 
-        let soft =
-            execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
         assert_eq!(soft, None);
         assert_eq!(mock.get_add_to_stack_calls().len(), 1);
         assert_eq!(mock.get_add_to_stack_calls()[0].stack_number, 7);
@@ -733,8 +731,7 @@ mod stack_register_test {
             .map(|pr| (pr.head_ref.clone(), pr))
             .collect();
 
-        let soft =
-            execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
         assert_eq!(soft, None);
         assert!(mock.get_create_stack_calls().is_empty());
         assert!(mock.get_add_to_stack_calls().is_empty());
@@ -751,8 +748,7 @@ mod stack_register_test {
             .map(|pr| (pr.head_ref.clone(), pr))
             .collect();
 
-        let soft =
-            execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
         assert!(soft.is_some());
         assert!(soft.unwrap().contains("unstack"));
     }
@@ -768,8 +764,7 @@ mod stack_register_test {
             .map(|pr| (pr.head_ref.clone(), pr))
             .collect();
 
-        let soft =
-            execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
         assert_eq!(
             soft.as_deref(),
             Some("Stack registration skipped: stacks endpoint not available")
@@ -788,8 +783,7 @@ mod stack_register_test {
             .map(|pr| (pr.head_ref.clone(), pr))
             .collect();
 
-        let soft =
-            execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
         assert_eq!(
             soft.as_deref(),
             Some("Stack registration failed: platform error: 422 unprocessable")
@@ -808,8 +802,7 @@ mod stack_register_test {
             .map(|pr| (pr.head_ref.clone(), pr))
             .collect();
 
-        let soft =
-            execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
         assert_eq!(soft, None);
         assert_eq!(mock.get_add_to_stack_calls().len(), 2);
     }
@@ -826,8 +819,7 @@ mod stack_register_test {
             .map(|pr| (pr.head_ref.clone(), pr))
             .collect();
 
-        let soft =
-            execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
         assert!(soft.is_some());
         assert_eq!(mock.get_add_to_stack_calls().len(), 4);
     }
@@ -839,6 +831,99 @@ mod stack_register_test {
             err.to_string(),
             "GitHub stacked PRs unavailable: not enabled"
         );
+    }
+}
+
+mod sync_merged_test {
+    use crate::common::fixtures::{github_config, gitlab_config};
+    use crate::common::mock_platform::{MockPlatformService, make_stack, make_stack_with};
+    use jj_ryu::sync_merged::{MergedLayer, detect_merged_layers};
+    use std::collections::HashMap;
+
+    fn tracked() -> Vec<String> {
+        vec![
+            "feat-1".to_string(),
+            "feat-2".to_string(),
+            "feat-3".to_string(),
+        ]
+    }
+
+    fn pr_numbers() -> HashMap<String, u64> {
+        [("feat-1", 1), ("feat-2", 2), ("feat-3", 3)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_detect_merged_bottom() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_stack_for_pr(1, Some(make_stack_with(7, &[1, 2, 3], &[1])));
+
+        let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
+            .await
+            .unwrap();
+        assert_eq!(
+            merged,
+            vec![MergedLayer {
+                bookmark: "feat-1".to_string(),
+                pr_number: Some(1),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detect_none_merged() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_stack_for_pr(1, Some(make_stack(7, &[1, 2, 3])));
+
+        let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
+            .await
+            .unwrap();
+        assert!(merged.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_detect_skips_unsupported_platform() {
+        let mock = MockPlatformService::with_config(gitlab_config());
+
+        let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
+            .await
+            .unwrap();
+        assert!(merged.is_empty());
+        assert!(mock.get_find_stack_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_detect_skips_when_stacks_unavailable() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.stacks_unavailable();
+
+        let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
+            .await
+            .unwrap();
+        assert!(merged.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_detect_skips_when_not_stacked() {
+        let mock = MockPlatformService::with_config(github_config());
+
+        let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
+            .await
+            .unwrap();
+        assert!(merged.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_detect_skips_without_cached_prs() {
+        let mock = MockPlatformService::with_config(github_config());
+
+        let merged = detect_merged_layers(&mock, &tracked(), &HashMap::new())
+            .await
+            .unwrap();
+        assert!(merged.is_empty());
+        assert!(mock.get_find_stack_calls().is_empty());
     }
 }
 

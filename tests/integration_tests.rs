@@ -471,3 +471,89 @@ fn test_git_fetch_handles_rebased_commits() {
 
 use std::process::Command as StdCommand;
 use tempfile::TempDir;
+
+// =============================================================================
+// Merged-layer sync (apply_merged_layers)
+// =============================================================================
+
+/// Simulates the post-merge state: the bottom PR merged upstream and main
+/// advanced (squash). `apply_merged_layers` must drop the merged layer and
+/// rebase the remaining stack onto the new trunk tip.
+#[test]
+fn test_apply_merged_layers_drops_and_rebases() {
+    use jj_ryu::sync_merged::{MergedLayer, apply_merged_layers};
+    use jj_ryu::tracking::{PrCache, TrackedBookmark, TrackingState};
+
+    let (_remote_dir, remote_path) = TempJjRepo::create_bare_remote();
+    let repo = TempJjRepo::new();
+    repo.add_remote("origin", &remote_path);
+
+    // main on the initial commit, pushed so trunk() resolves to main@origin
+    StdCommand::new("jj")
+        .args(["bookmark", "create", "main", "-r", "@-"])
+        .current_dir(repo.path())
+        .output()
+        .expect("create main");
+    repo.push_bookmark("main", "origin");
+
+    // Build the stack
+    repo.build_stack(&[
+        ("feat-a", "Add A"),
+        ("feat-b", "Add B"),
+        ("feat-c", "Add C"),
+    ]);
+
+    // Simulate the squash merge of feat-a landing on main
+    StdCommand::new("jj")
+        .args(["new", "main", "-m", "Squash merge of feat-a"])
+        .current_dir(repo.path())
+        .output()
+        .expect("jj new main");
+    repo.move_bookmark("main", "@");
+    repo.push_bookmark("main", "origin");
+    StdCommand::new("jj")
+        .args(["new", "feat-c"])
+        .current_dir(repo.path())
+        .output()
+        .expect("jj new feat-c");
+
+    let mut workspace = repo.workspace();
+
+    let mut tracking = TrackingState::default();
+    for name in ["feat-a", "feat-b", "feat-c"] {
+        tracking.track(TrackedBookmark::new(name.to_string(), "change".to_string()));
+    }
+    let mut pr_cache = PrCache::new();
+    pr_cache.upsert("feat-a", &make_pr(1, "feat-a", "main"), "origin");
+    pr_cache.upsert("feat-b", &make_pr(2, "feat-b", "feat-a"), "origin");
+    pr_cache.upsert("feat-c", &make_pr(3, "feat-c", "feat-b"), "origin");
+
+    let merged = vec![MergedLayer {
+        bookmark: "feat-a".to_string(),
+        pr_number: Some(1),
+    }];
+    let reparented =
+        apply_merged_layers(&mut workspace, &mut tracking, &mut pr_cache, &merged).unwrap();
+
+    // Merged layer is gone
+    assert!(workspace.get_local_bookmark("feat-a").unwrap().is_none());
+    assert!(!tracking.is_tracked("feat-a"));
+    assert!(pr_cache.get("feat-a").is_none());
+
+    // The remaining stack was reparented onto the new trunk tip
+    assert_eq!(reparented, 1);
+    let trunk = workspace.resolve_revset("trunk()").unwrap();
+    let roots = workspace.resolve_revset("roots(trunk()..@)").unwrap();
+    assert_eq!(roots.len(), 1);
+    assert_eq!(roots[0].parents, vec![trunk[0].commit_id.clone()]);
+
+    // Remaining stack is intact
+    let graph = build_change_graph(&workspace).expect("build graph");
+    let stack = graph.stack.expect("stack");
+    let names: Vec<&str> = stack
+        .segments
+        .iter()
+        .map(|s| s.bookmarks[0].name.as_str())
+        .collect();
+    assert_eq!(names, ["feat-b", "feat-c"]);
+}

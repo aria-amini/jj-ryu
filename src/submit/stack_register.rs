@@ -209,7 +209,9 @@ pub async fn report_stack_dry_run(
             }
             Err(e) => {
                 progress
-                    .on_message(&format!("  → stack registration unknown (lookup failed: {e})"))
+                    .on_message(&format!(
+                        "  → stack registration unknown (lookup failed: {e})"
+                    ))
                     .await;
             }
         }

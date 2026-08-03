@@ -83,11 +83,10 @@ impl GitHubService {
     pub fn new(token: &str, owner: String, repo: String, host: Option<String>) -> Result<Self> {
         let mut builder = Octocrab::builder().personal_token(token.to_string());
 
-        let api_base = host
-            .as_ref()
-            .map_or_else(|| "https://api.github.com".to_string(), |h| {
-                format!("https://{h}/api/v3")
-            });
+        let api_base = host.as_ref().map_or_else(
+            || "https://api.github.com".to_string(),
+            |h| format!("https://{h}/api/v3"),
+        );
 
         if let Some(ref h) = host {
             let base_url = format!("https://{h}/api/v3");

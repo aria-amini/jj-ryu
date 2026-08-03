@@ -15,6 +15,9 @@ src/
 ├── cli/            # CLI-only (not exported from lib)
 ├── submit/         # 3-phase engine: analysis → plan → execute (see AGENTS.md)
 ├── platform/       # PlatformService trait + GitHub (github/ incl. Stacks API) /GitLab impls
+├── merge.rs        # Async merge orchestration for native stacks
+├── unstack.rs      # Native stack removal
+├── sync_merged.rs  # Merged-layer detection + stack rebase for sync
 ├── graph/          # ChangeGraph builder from jj workspace
 ├── repo/           # JjWorkspace wrapper, revset resolution, trunk() alias
 ├── auth/           # Token retrieval (gh/glab CLI integration)

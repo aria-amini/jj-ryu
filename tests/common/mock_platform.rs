@@ -466,11 +466,7 @@ impl PlatformService for MockPlatformService {
         })
     }
 
-    async fn poll_merge_async(
-        &self,
-        pr_number: u64,
-        uuid: &str,
-    ) -> Result<MergeAsyncState> {
+    async fn poll_merge_async(&self, pr_number: u64, uuid: &str) -> Result<MergeAsyncState> {
         self.poll_calls
             .lock()
             .unwrap()

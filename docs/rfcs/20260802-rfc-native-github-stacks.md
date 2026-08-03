@@ -1,6 +1,6 @@
 # RFC: Native GitHub Stacks Integration
 
-**Status:** Approved (in progress)
+**Status:** Implemented
 **Date:** 2026-08-02
 **Scope:** Replace stack navigation comments with native GitHub Stacks registration;
 add `merge`/`unstack` commands; teach `sync` about server-side rebases.
@@ -71,6 +71,52 @@ Dry-run reports the intended action (bookmark names when PRs don't exist yet).
 - `Error::StacksUnavailable` (404/403 at runtime — GHES or rollout-off): submit
   succeeds with a soft warning; view omits stack info; sync skips merged-layer
   detection; `merge`/`unstack` fail with an actionable message.
+
+### `ryu unstack` (`src/unstack.rs`, `src/cli/unstack.rs`)
+
+Finds the native stack containing any submitted PR (via the PR cache), shows a
+summary, confirms, and calls the unstack endpoint — removing all unmerged PRs from
+the GitHub-side grouping. Local bookmarks, branches, tracking state, and the PRs
+themselves are untouched. This is the supported escape hatch before restructuring,
+since the Stacks API is additive-only (no single-PR removal, no reordering).
+
+### `ryu` view (`src/cli/analyze.rs`)
+
+When the default remote is GitHub and the bottom submitted PR belongs to a native
+stack, each bookmark line is annotated with its stack position (`stack #7 2/5`) or
+`merged`. One `find_stack_for_pr` call per view; every failure mode (no auth, GHES,
+GitLab, unstacked) silently renders the pre-stacks view.
+
+### `ryu merge` (`src/merge.rs`, `src/cli/merge.rs`)
+
+Merging a stacked PR merges every unmerged PR below it, so the command takes an
+optional bookmark (default: the bottom unmerged layer) and always merges bottom-up:
+
+1. Resolve the target PR (cache → `find_existing_pr`), find its stack.
+2. `plan_merge` computes the affected layers (unmerged entries through the target);
+   already-merged targets and non-stacked PRs are actionable errors.
+3. Confirm, then `merge_pr_async` with the entry's head SHA. `AlreadyMergedOrQueued`
+   is informational; `MergeInProgress` (409) tells the user to wait.
+4. `poll_merge` polls the UUID every 2s (120s timeout); interval/timeout are
+   parameters for tests. Timeout prints the UUID for manual checking.
+5. On success, merged layers are removed from the PR cache; the user is told to run
+   `ryu sync`.
+
+### `ryu sync` merged layers (`src/sync_merged.rs`)
+
+After fetch, `detect_merged_layers` matches tracked bookmarks against stack entries
+with `merged_at` set. For each merged layer, `apply_merged_layers` deletes the local
+bookmark, abandons the merged commit (children reparent onto its parents), untracks
+it, and removes its cache entry; finally `rebase_stack_onto_trunk` reparents the
+stack roots onto the new trunk tip and rebases descendants.
+
+**Deliberate tradeoff:** the server-rewritten remote branches are *not* adopted
+directly. After the local rebase, the normal submit machinery force-pushes (with
+lease) locally-rebased branches whose content is equivalent to GitHub's server-side
+rebase. This is uniform for all cases — clean rebases, local-unique commits, and
+divergence all take the same path — at the cost of one extra head-sha rewrite on
+each remaining PR. Adopting remote tips when the local bookmark has no unique
+commits is a possible future optimization.
 
 ## Uncertainties to verify empirically
 

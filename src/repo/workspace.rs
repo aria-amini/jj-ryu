@@ -3,7 +3,7 @@
 use crate::error::{Error, Result};
 use crate::types::{Bookmark, GitRemote, LogEntry};
 use chrono::{DateTime, TimeZone, Utc};
-use jj_lib::backend::Timestamp;
+use jj_lib::backend::{CommitId, Timestamp};
 use jj_lib::commit::Commit;
 use jj_lib::config::{ConfigLayer, ConfigSource, StackedConfig};
 use jj_lib::git::{
@@ -11,7 +11,7 @@ use jj_lib::git::{
     expand_fetch_refspecs,
 };
 use jj_lib::object_id::ObjectId;
-use jj_lib::op_store::{RemoteRef, RemoteRefState};
+use jj_lib::op_store::{RefTarget, RemoteRef, RemoteRefState};
 use jj_lib::ref_name::{RefName, RemoteName};
 use jj_lib::repo::{Repo, StoreFactories};
 use jj_lib::repo_path::RepoPathUiConverter;
@@ -300,13 +300,33 @@ impl JjWorkspace {
     /// Resolve a revset expression to commits
     pub fn resolve_revset(&self, expr: &str) -> Result<Vec<LogEntry>> {
         let repo = self.repo()?;
+        let commit_ids = self.evaluate_revset(&repo, expr)?;
 
+        let mut entries = Vec::new();
+        for commit_id in commit_ids {
+            let commit = repo
+                .store()
+                .get_commit(&commit_id)
+                .map_err(|e| Error::Workspace(format!("Failed to get commit: {e}")))?;
+
+            entries.push(Self::commit_to_log_entry(&repo, &commit));
+        }
+
+        Ok(entries)
+    }
+
+    /// Parse and evaluate a revset expression, returning matching commit IDs
+    fn evaluate_revset(
+        &self,
+        repo: &Arc<jj_lib::repo::ReadonlyRepo>,
+        expr: &str,
+    ) -> Result<Vec<CommitId>> {
         // Parse and evaluate the revset
         let extensions = RevsetExtensions::default();
         let mut aliases = revset::RevsetAliasesMap::default();
 
         // Define trunk() alias - checks remote HEAD first, then falls back to jj's default
-        let trunk_alias = Self::compute_trunk_alias(&repo);
+        let trunk_alias = Self::compute_trunk_alias(repo);
         aliases
             .insert("trunk()", trunk_alias)
             .expect("trunk() alias declaration is valid");
@@ -350,19 +370,14 @@ impl JjWorkspace {
             .evaluate(repo.as_ref())
             .map_err(|e| Error::Revset(format!("Failed to evaluate revset: {e}")))?;
 
-        let mut entries = Vec::new();
+        let mut commit_ids = Vec::new();
         for commit_id in revset.iter() {
-            let commit_id =
-                commit_id.map_err(|e| Error::Revset(format!("Failed to iterate revset: {e}")))?;
-            let commit = repo
-                .store()
-                .get_commit(&commit_id)
-                .map_err(|e| Error::Workspace(format!("Failed to get commit: {e}")))?;
-
-            entries.push(Self::commit_to_log_entry(&repo, &commit));
+            commit_ids.push(
+                commit_id.map_err(|e| Error::Revset(format!("Failed to iterate revset: {e}")))?,
+            );
         }
 
-        Ok(entries)
+        Ok(commit_ids)
     }
 
     /// Convert a jj commit to a `LogEntry`
@@ -582,6 +597,107 @@ impl JjWorkspace {
             .map_err(|e| Error::Git(format!("Failed to commit push: {e}")))?;
 
         Ok(())
+    }
+
+    /// Delete a local bookmark (no-op when it doesn't exist)
+    pub fn delete_local_bookmark(&mut self, name: &str) -> Result<()> {
+        let repo = self.repo()?;
+        let ref_name = RefName::new(name);
+
+        if !repo.view().get_local_bookmark(ref_name).is_present() {
+            return Ok(());
+        }
+
+        let mut tx = repo.start_transaction();
+        tx.repo_mut()
+            .set_local_bookmark_target(ref_name, RefTarget::absent());
+        tx.commit(format!("delete bookmark {name}"))
+            .map_err(|e| Error::Workspace(format!("Failed to commit bookmark deletion: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Abandon commits, reparenting their children onto the commits' parents
+    pub fn abandon_commits(&mut self, commit_ids: &[String]) -> Result<()> {
+        if commit_ids.is_empty() {
+            return Ok(());
+        }
+
+        let repo = self.repo()?;
+        let mut tx = repo.start_transaction();
+        for hex in commit_ids {
+            let id = CommitId::try_from_hex(hex)
+                .ok_or_else(|| Error::Workspace(format!("Invalid commit id: {hex}")))?;
+            let commit = repo
+                .store()
+                .get_commit(&id)
+                .map_err(|e| Error::Workspace(format!("Failed to get commit: {e}")))?;
+            tx.repo_mut().record_abandoned_commit(&commit);
+        }
+
+        tx.repo_mut()
+            .rebase_descendants()
+            .map_err(|e| Error::Workspace(format!("Failed to rebase descendants: {e}")))?;
+
+        tx.commit("abandon merged commits")
+            .map_err(|e| Error::Workspace(format!("Failed to commit abandon: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Rebase the bottom of the current stack onto the trunk tip
+    ///
+    /// Reparents each commit in `roots(trunk()..@)` onto `trunk()` and rebases
+    /// descendants. Returns the number of root commits reparented (0 when the
+    /// stack is already based on trunk).
+    pub fn rebase_stack_onto_trunk(&mut self) -> Result<usize> {
+        let repo = self.repo()?;
+
+        let root_ids = self.evaluate_revset(&repo, "roots(trunk()..@)")?;
+        if root_ids.is_empty() {
+            return Ok(0);
+        }
+        let trunk_ids = self.evaluate_revset(&repo, "trunk()")?;
+        let Some(trunk_id) = trunk_ids.first() else {
+            return Err(Error::Workspace("Could not resolve trunk()".to_string()));
+        };
+        let trunk_commit = repo
+            .store()
+            .get_commit(trunk_id)
+            .map_err(|e| Error::Workspace(format!("Failed to get trunk commit: {e}")))?;
+
+        let mut tx = repo.start_transaction();
+        let mut reparented = 0;
+        for root_id in &root_ids {
+            let commit = repo
+                .store()
+                .get_commit(root_id)
+                .map_err(|e| Error::Workspace(format!("Failed to get commit: {e}")))?;
+
+            if commit.parent_ids().contains(&trunk_commit.id().clone()) {
+                continue;
+            }
+
+            tx.repo_mut()
+                .rewrite_commit(&commit)
+                .set_parents(vec![trunk_commit.id().clone()])
+                .write()
+                .map_err(|e| Error::Workspace(format!("Failed to rebase commit: {e}")))?;
+            reparented += 1;
+        }
+
+        if reparented == 0 {
+            return Ok(0);
+        }
+
+        tx.repo_mut()
+            .rebase_descendants()
+            .map_err(|e| Error::Workspace(format!("Failed to rebase descendants: {e}")))?;
+
+        tx.commit("rebase stack onto trunk")
+            .map_err(|e| Error::Workspace(format!("Failed to commit rebase: {e}")))?;
+
+        Ok(reparented)
     }
 
     /// Get the default branch name by checking remote HEAD first, then common names
