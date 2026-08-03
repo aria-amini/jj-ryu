@@ -13,19 +13,23 @@ const TRACKING_FILE: &str = "tracked.toml";
 
 /// Resolve the `.jj/repo` path, handling jj workspace indirection.
 ///
-/// In jj workspaces (created via `jj workspace add`), the `.jj/repo` path
-/// in child workspaces is a plain text file containing the absolute path
-/// to the parent workspace's `.jj/repo` directory. We must read this file
-/// and use its contents as the actual repo path.
+/// In jj workspaces (created via `jj workspace add`), `.jj/repo` is a plain
+/// text file containing the path to the real repo directory, written
+/// relative to the `.jj` directory (e.g. `../../../main/.jj/repo`).
 ///
 /// Falls back to the original path if resolution fails.
 pub(super) fn resolve_repo_path(workspace_root: &Path) -> PathBuf {
-    let repo_path = workspace_root.join(".jj").join("repo");
+    let jj_dir = workspace_root.join(".jj");
+    let repo_path = jj_dir.join("repo");
 
-    // In jj workspaces, .jj/repo may be a file containing the path to the real repo
     if repo_path.is_file() {
         if let Ok(contents) = fs::read_to_string(&repo_path) {
-            let target = PathBuf::from(contents.trim());
+            let raw = PathBuf::from(contents.trim());
+            let target = if raw.is_absolute() {
+                raw
+            } else {
+                jj_dir.join(raw)
+            };
             if target.is_dir() {
                 return fs::canonicalize(&target).unwrap_or(target);
             }
@@ -221,6 +225,26 @@ mod tests {
         let resolved = resolve_repo_path(&child);
 
         // The resolved path should be the canonicalized parent's repo
+        let canonical_parent = fs::canonicalize(&parent_repo).unwrap();
+        assert_eq!(resolved, canonical_parent);
+    }
+
+    #[test]
+    fn test_resolve_repo_path_relative_pointer() {
+        // jj writes workspace pointers relative to the .jj directory
+        let temp = TempDir::new().unwrap();
+        let parent = temp.path().join("parent");
+        let child = temp.path().join("nested").join("child");
+
+        let parent_repo = parent.join(".jj").join("repo");
+        fs::create_dir_all(&parent_repo).unwrap();
+
+        let child_jj = child.join(".jj");
+        fs::create_dir_all(&child_jj).unwrap();
+        fs::write(child_jj.join("repo"), "../../../parent/.jj/repo\n").unwrap();
+
+        let resolved = resolve_repo_path(&child);
+
         let canonical_parent = fs::canonicalize(&parent_repo).unwrap();
         assert_eq!(resolved, canonical_parent);
     }
