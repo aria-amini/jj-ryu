@@ -123,6 +123,8 @@ fn print_stack_summary(stack: &PrStack, remote: &str) {
     for entry in &stack.pull_requests {
         let status = if entry.merged_at.is_some() {
             "merged".muted().to_string()
+        } else if entry.state == "closed" {
+            "closed".muted().to_string()
         } else if entry.draft {
             "draft".warn().to_string()
         } else {
