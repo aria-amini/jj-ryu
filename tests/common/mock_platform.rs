@@ -65,6 +65,7 @@ pub struct MockPlatformService {
     add_to_stack_calls: Mutex<Vec<AddToStackCall>>,
     unstack_calls: Mutex<Vec<u64>>,
     merge_calls: Mutex<Vec<u64>>,
+    poll_calls: Mutex<Vec<(u64, String)>>,
     // Error injection
     error_on_find_pr: Mutex<Option<String>>,
     error_on_create_pr: Mutex<Option<String>>,
@@ -74,6 +75,10 @@ pub struct MockPlatformService {
     error_on_add_to_stack: Mutex<Option<String>>,
     // Number of times `add_to_stack` returns StackConflict before succeeding
     conflict_add_to_stack: Mutex<usize>,
+    // Queued responses for `poll_merge_async` (Merged when exhausted)
+    poll_responses: Mutex<Vec<MergeAsyncState>>,
+    // Make `merge_pr_async` return MergeInProgress
+    merge_in_progress: Mutex<bool>,
 }
 
 impl MockPlatformService {
@@ -94,6 +99,7 @@ impl MockPlatformService {
             add_to_stack_calls: Mutex::new(Vec::new()),
             unstack_calls: Mutex::new(Vec::new()),
             merge_calls: Mutex::new(Vec::new()),
+            poll_calls: Mutex::new(Vec::new()),
             error_on_find_pr: Mutex::new(None),
             error_on_create_pr: Mutex::new(None),
             error_on_update_base: Mutex::new(None),
@@ -101,6 +107,8 @@ impl MockPlatformService {
             error_on_create_stack: Mutex::new(None),
             error_on_add_to_stack: Mutex::new(None),
             conflict_add_to_stack: Mutex::new(0),
+            poll_responses: Mutex::new(Vec::new()),
+            merge_in_progress: Mutex::new(false),
         }
     }
 
@@ -144,6 +152,21 @@ impl MockPlatformService {
     /// Make `add_to_stack` fail with `StackConflict` `times` times before succeeding
     pub fn conflict_add_to_stack(&self, times: usize) {
         *self.conflict_add_to_stack.lock().unwrap() = times;
+    }
+
+    /// Queue responses for `poll_merge_async` (returns Merged once exhausted)
+    pub fn set_poll_responses(&self, states: Vec<MergeAsyncState>) {
+        *self.poll_responses.lock().unwrap() = states;
+    }
+
+    /// Make `merge_pr_async` return `MergeInProgress` (HTTP 409)
+    pub fn merge_conflict(&self) {
+        *self.merge_in_progress.lock().unwrap() = true;
+    }
+
+    /// Get all `poll_merge_async` calls
+    pub fn get_poll_calls(&self) -> Vec<(u64, String)> {
+        self.poll_calls.lock().unwrap().clone()
     }
 
     /// Set the response for `find_existing_pr` for a specific branch
@@ -238,6 +261,11 @@ impl MockPlatformService {
 
 /// Build a mock stack from PR numbers (bottom to top)
 pub fn make_stack(number: u64, pr_numbers: &[u64]) -> PrStack {
+    make_stack_with(number, pr_numbers, &[])
+}
+
+/// Build a mock stack; entries in `merged` get a `merged_at` timestamp
+pub fn make_stack_with(number: u64, pr_numbers: &[u64], merged: &[u64]) -> PrStack {
     PrStack {
         id: number * 1000,
         number,
@@ -252,9 +280,15 @@ pub fn make_stack(number: u64, pr_numbers: &[u64]) -> PrStack {
             .iter()
             .map(|n| PrStackEntry {
                 number: *n,
-                state: "open".to_string(),
+                state: if merged.contains(n) {
+                    "closed".to_string()
+                } else {
+                    "open".to_string()
+                },
                 draft: false,
-                merged_at: None,
+                merged_at: merged
+                    .contains(n)
+                    .then(|| chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap()),
                 head: PrStackHead {
                     ref_field: format!("feat-{n}"),
                     sha: format!("sha_{n}"),
@@ -422,6 +456,11 @@ impl PlatformService for MockPlatformService {
         _options: &MergeOptions,
     ) -> Result<MergeAsyncOutcome> {
         self.merge_calls.lock().unwrap().push(pr_number);
+        if *self.merge_in_progress.lock().unwrap() {
+            return Err(Error::MergeInProgress(
+                "an async merge is already enqueued".to_string(),
+            ));
+        }
         Ok(MergeAsyncOutcome::Accepted {
             uuid: "mock-uuid".to_string(),
         })
@@ -429,10 +468,19 @@ impl PlatformService for MockPlatformService {
 
     async fn poll_merge_async(
         &self,
-        _pr_number: u64,
-        _uuid: &str,
+        pr_number: u64,
+        uuid: &str,
     ) -> Result<MergeAsyncState> {
-        Ok(MergeAsyncState::Merged)
+        self.poll_calls
+            .lock()
+            .unwrap()
+            .push((pr_number, uuid.to_string()));
+        let mut queue = self.poll_responses.lock().unwrap();
+        if queue.is_empty() {
+            Ok(MergeAsyncState::Merged)
+        } else {
+            Ok(queue.remove(0))
+        }
     }
 
     fn config(&self) -> &PlatformConfig {

@@ -842,6 +842,89 @@ mod stack_register_test {
     }
 }
 
+mod merge_test {
+    use crate::common::fixtures::github_config;
+    use crate::common::mock_platform::{MockPlatformService, make_stack, make_stack_with};
+    use jj_ryu::error::Error;
+    use jj_ryu::merge::{plan_merge, poll_merge};
+    use jj_ryu::types::MergeAsyncState;
+    use std::time::Duration;
+
+    #[test]
+    fn test_plan_merge_bottom_target_merges_only_itself() {
+        let stack = make_stack(7, &[1, 2, 3]);
+        let plan = plan_merge(stack, 1).unwrap();
+        assert_eq!(plan.layers.len(), 1);
+        assert_eq!(plan.layers[0].number, 1);
+        assert_eq!(plan.remaining().len(), 2);
+    }
+
+    #[test]
+    fn test_plan_merge_mid_target_merges_below() {
+        let stack = make_stack(7, &[1, 2, 3]);
+        let plan = plan_merge(stack, 2).unwrap();
+        let numbers: Vec<u64> = plan.layers.iter().map(|e| e.number).collect();
+        assert_eq!(numbers, vec![1, 2]);
+        assert_eq!(plan.remaining().len(), 1);
+    }
+
+    #[test]
+    fn test_plan_merge_excludes_already_merged_below() {
+        let stack = make_stack_with(7, &[1, 2, 3], &[1]);
+        let plan = plan_merge(stack, 3).unwrap();
+        let numbers: Vec<u64> = plan.layers.iter().map(|e| e.number).collect();
+        assert_eq!(numbers, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_plan_merge_errors_on_merged_target() {
+        let stack = make_stack_with(7, &[1, 2], &[1]);
+        let err = plan_merge(stack, 1).unwrap_err();
+        assert!(err.to_string().contains("already merged"));
+    }
+
+    #[test]
+    fn test_plan_merge_errors_when_pr_not_in_stack() {
+        let stack = make_stack(7, &[1, 2]);
+        assert!(matches!(plan_merge(stack, 9), Err(Error::Internal(_))));
+    }
+
+    #[tokio::test]
+    async fn test_poll_merge_pending_then_merged() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_poll_responses(vec![MergeAsyncState::Pending, MergeAsyncState::Merged]);
+
+        let state = poll_merge(&mock, 1, "uuid", Duration::ZERO, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(state, MergeAsyncState::Merged);
+        assert_eq!(mock.get_poll_calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_poll_merge_timeout_returns_last_state() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_poll_responses(vec![MergeAsyncState::Pending; 100]);
+
+        let state = poll_merge(&mock, 1, "uuid", Duration::ZERO, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(state, MergeAsyncState::Pending);
+        assert_eq!(mock.get_poll_calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_poll_merge_failed() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_poll_responses(vec![MergeAsyncState::Failed]);
+
+        let state = poll_merge(&mock, 1, "uuid", Duration::ZERO, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(state, MergeAsyncState::Failed);
+    }
+}
+
 mod unstack_test {
     use crate::common::fixtures::github_config;
     use crate::common::mock_platform::{MockPlatformService, make_stack};

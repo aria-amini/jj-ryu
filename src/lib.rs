@@ -17,6 +17,7 @@
 pub mod auth;
 pub mod error;
 pub mod graph;
+pub mod merge;
 pub mod platform;
 pub mod repo;
 pub mod submit;
