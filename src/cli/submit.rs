@@ -200,6 +200,9 @@ pub async fn run_submit(
     // Update PR cache with results
     if !options.dry_run && result.success {
         let mut pr_cache = load_pr_cache(&workspace_root).unwrap_or_default();
+        for (bookmark, pr) in &plan.existing_prs {
+            pr_cache.upsert(bookmark, pr, &remote_name);
+        }
         for pr in result.created_prs.iter().chain(result.updated_prs.iter()) {
             pr_cache.upsert(&pr.head_ref, pr, &remote_name);
         }

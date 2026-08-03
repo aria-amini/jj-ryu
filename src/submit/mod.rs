@@ -15,7 +15,7 @@ pub use analysis::{
     SubmissionAnalysis, analyze_submission, create_narrowed_segments, generate_pr_title,
     get_base_branch, select_bookmark_for_segment,
 };
-pub use execute::{SubmissionResult, execute_submission};
+pub use execute::{StepOutcome, SubmissionResult, execute_submission, execute_update_base};
 pub use plan::{
     ExecutionConstraint, ExecutionStep, PrBaseUpdate, PrToCreate, SubmissionPlan,
     create_submission_plan,

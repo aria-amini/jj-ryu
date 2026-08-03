@@ -1059,6 +1059,86 @@ mod unstack_test {
     }
 }
 
+mod execute_update_base_test {
+    use crate::common::fixtures::{github_config, gitlab_config, make_bookmark};
+    use crate::common::mock_platform::{MockPlatformService, make_stack};
+    use jj_ryu::submit::{PrBaseUpdate, StepOutcome, execute_update_base};
+    use jj_ryu::types::PullRequest;
+
+    fn make_update(pr_number: u64, bookmark: &str) -> PrBaseUpdate {
+        PrBaseUpdate {
+            bookmark: make_bookmark(bookmark),
+            current_base: "main".to_string(),
+            expected_base: "feat-base".to_string(),
+            pr: PullRequest {
+                number: pr_number,
+                html_url: format!("https://github.com/test/repo/pull/{pr_number}"),
+                base_ref: "main".to_string(),
+                head_ref: bookmark.to_string(),
+                title: format!("PR for {bookmark}"),
+                node_id: Some(format!("PR_node_{pr_number}")),
+                is_draft: false,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dissolves_stack_before_updating_base() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_stack_for_pr(1, Some(make_stack(7, &[1, 2])));
+
+        let outcome = execute_update_base(&mock, &make_update(1, "feat-a")).await;
+
+        assert!(matches!(outcome, StepOutcome::Success(_)));
+        assert_eq!(mock.get_unstack_calls(), vec![7]);
+        assert_eq!(mock.get_update_base_calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_no_unstack_when_pr_not_stacked() {
+        let mock = MockPlatformService::with_config(github_config());
+
+        let outcome = execute_update_base(&mock, &make_update(1, "feat-a")).await;
+
+        assert!(matches!(outcome, StepOutcome::Success(_)));
+        assert!(mock.get_unstack_calls().is_empty());
+        assert_eq!(mock.get_update_base_calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_skips_stack_check_without_native_stacks() {
+        let mock = MockPlatformService::with_config(gitlab_config());
+
+        let outcome = execute_update_base(&mock, &make_update(1, "feat-a")).await;
+
+        assert!(matches!(outcome, StepOutcome::Success(_)));
+        assert!(mock.get_find_stack_calls().is_empty());
+        assert!(mock.get_unstack_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_stacks_unavailable_proceeds_with_update() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.stacks_unavailable();
+
+        let outcome = execute_update_base(&mock, &make_update(1, "feat-a")).await;
+
+        assert!(matches!(outcome, StepOutcome::Success(_)));
+        assert_eq!(mock.get_update_base_calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_find_stack_error_is_fatal() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.fail_find_stack("api down");
+
+        let outcome = execute_update_base(&mock, &make_update(1, "feat-a")).await;
+
+        assert!(matches!(outcome, StepOutcome::FatalError(_)));
+        assert!(mock.get_update_base_calls().is_empty());
+    }
+}
+
 mod sync_test {
     use jj_ryu::error::Error;
     use jj_ryu::repo::select_remote;

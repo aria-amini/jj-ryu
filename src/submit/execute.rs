@@ -75,6 +75,28 @@ pub async fn execute_update_base(
     platform: &dyn PlatformService,
     update: &PrBaseUpdate,
 ) -> StepOutcome {
+    // GitHub rejects base edits while a PR belongs to a native stack, so
+    // dissolve the stack first; registration at the end re-creates it
+    if platform.supports_native_stacks() {
+        match platform.find_stack_for_pr(update.pr.number).await {
+            Ok(Some(stack)) => {
+                if let Err(e) = platform.unstack(stack.number).await {
+                    return StepOutcome::FatalError(format!(
+                        "Failed to dissolve stack #{} before updating base for {}: {e}",
+                        stack.number, update.bookmark.name
+                    ));
+                }
+            }
+            Ok(None) | Err(Error::StacksUnavailable(_)) => {}
+            Err(e) => {
+                return StepOutcome::FatalError(format!(
+                    "Failed to check stack membership for {}: {e}",
+                    update.bookmark.name
+                ));
+            }
+        }
+    }
+
     match platform
         .update_pr_base(update.pr.number, &update.expected_base)
         .await

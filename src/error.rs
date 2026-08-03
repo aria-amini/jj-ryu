@@ -79,7 +79,7 @@ pub enum Error {
 
     /// Octocrab (GitHub) error
     #[error("GitHub client error: {0}")]
-    Octocrab(#[from] octocrab::Error),
+    Octocrab(octocrab::Error),
 
     /// Platform API error (generic)
     #[error("platform error: {0}")]
@@ -134,3 +134,14 @@ pub enum Error {
 
 /// Result type alias for jj-ryu operations
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl From<octocrab::Error> for Error {
+    fn from(error: octocrab::Error) -> Self {
+        // octocrab's Display for GitHub errors omits the API response body,
+        // which carries the actionable message (e.g. validation failures)
+        if let octocrab::Error::GitHub { source, .. } = &error {
+            return Self::GitHubApi(source.message.clone());
+        }
+        Self::Octocrab(error)
+    }
+}

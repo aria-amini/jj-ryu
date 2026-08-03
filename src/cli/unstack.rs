@@ -5,7 +5,7 @@ use crate::cli::style::{Stylize, check};
 use anstream::println;
 use dialoguer::Confirm;
 use jj_ryu::error::{Error, Result};
-use jj_ryu::tracking::load_pr_cache;
+use jj_ryu::tracking::{load_pr_cache, load_tracking};
 use jj_ryu::types::PrStack;
 use jj_ryu::unstack::{UnstackOutcome, find_submitted_stack};
 use std::path::Path;
@@ -27,7 +27,8 @@ pub async fn run_unstack(path: &Path, remote: Option<&str>, yes: bool) -> Result
 
     let pr_cache = load_pr_cache(&ctx.workspace_root).unwrap_or_default();
     let pr_numbers: Vec<u64> = pr_cache.prs.iter().map(|p| p.number).collect();
-    if pr_numbers.is_empty() {
+    let tracking = load_tracking(&ctx.workspace_root).unwrap_or_default();
+    if pr_numbers.is_empty() && tracking.bookmarks.is_empty() {
         println!(
             "{}",
             "No submitted PRs found. Run 'ryu submit' first.".muted()
@@ -35,14 +36,36 @@ pub async fn run_unstack(path: &Path, remote: Option<&str>, yes: bool) -> Result
         return Ok(());
     }
 
-    let stack = find_submitted_stack(ctx.platform.as_ref(), &pr_numbers)
-        .await
-        .map_err(|e| match e {
-            Error::StacksUnavailable(msg) => Error::StacksUnavailable(format!(
-                "{msg}; unstack manually from the GitHub UI if needed"
-            )),
-            other => other,
-        })?;
+    let stack = if pr_numbers.is_empty() {
+        None
+    } else {
+        find_submitted_stack(ctx.platform.as_ref(), &pr_numbers)
+            .await
+            .map_err(|e| match e {
+                Error::StacksUnavailable(msg) => Error::StacksUnavailable(format!(
+                    "{msg}; unstack manually from the GitHub UI if needed"
+                )),
+                other => other,
+            })?
+    };
+
+    // The pr_cache can be stale (entries pointing at long-closed PRs), so
+    // fall back to resolving tracked bookmarks against the platform
+    let stack = match stack {
+        Some(stack) => Some(stack),
+        None => {
+            let mut found = None;
+            for bookmark in &tracking.bookmarks {
+                if let Ok(Some(pr)) = ctx.platform.find_existing_pr(&bookmark.name).await {
+                    found = find_submitted_stack(ctx.platform.as_ref(), &[pr.number]).await?;
+                    if found.is_some() {
+                        break;
+                    }
+                }
+            }
+            found
+        }
+    };
 
     let Some(stack) = stack else {
         println!("{}", "No submitted PR belongs to a native stack.".muted());
