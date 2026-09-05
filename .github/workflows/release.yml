@@ -203,6 +203,9 @@ jobs:
         with:
           path: artifacts
 
+      - name: Restore Unix permissions
+        run: chmod +x artifacts/*/ryu
+
       - name: Create release archives
         run: |
           mkdir -p release
