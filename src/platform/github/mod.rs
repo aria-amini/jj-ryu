@@ -2,6 +2,10 @@
 
 mod stacks;
 
+#[cfg(test)]
+#[path = "../../../tests/common/github_stacks.rs"]
+mod tests;
+
 use crate::error::{Error, Result};
 use crate::platform::PlatformService;
 use crate::types::{
