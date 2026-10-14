@@ -45,6 +45,12 @@ pub enum Error {
     #[error("GitLab API error: {0}")]
     GitLabApi(String),
 
+    /// Conflicted commit in a bookmark's history (cannot push)
+    #[error(
+        "bookmark '{0}' has conflicted commits - resolve the conflicts with jj, then submit again"
+    )]
+    ConflictedCommit(String),
+
     /// Merge commit detected (cannot stack)
     #[error("merge commit detected in bookmark '{0}' history - rebasing required")]
     MergeCommitDetected(String),
