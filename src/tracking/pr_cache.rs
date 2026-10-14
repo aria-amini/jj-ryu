@@ -179,7 +179,7 @@ mod tests {
     fn test_load_missing_file_returns_empty() {
         let temp = setup_fake_jj_workspace();
         let cache = load_pr_cache(temp.path()).unwrap();
-        assert!(cache.prs.is_empty());
+        assert_eq!(cache.prs.len(), 0);
         assert_eq!(cache.version, PR_CACHE_VERSION);
     }
 
