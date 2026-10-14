@@ -125,7 +125,7 @@ mod tests {
     fn test_load_missing_file_returns_empty() {
         let temp = setup_fake_jj_workspace();
         let state = load_tracking(temp.path()).unwrap();
-        assert!(state.bookmarks.is_empty());
+        assert_eq!(state.bookmarks.len(), 0);
         assert_eq!(state.version, TRACKING_VERSION);
     }
 

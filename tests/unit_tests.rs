@@ -663,7 +663,7 @@ mod stack_register_test {
 
         let action = plan_stack_action(&mock, &prs).await.unwrap();
         assert!(matches!(action, StackAction::Skip { .. }));
-        assert!(mock.get_find_stack_calls().is_empty());
+        assert_eq!(mock.get_find_stack_calls().len(), 0);
     }
 
     #[tokio::test]
@@ -673,7 +673,7 @@ mod stack_register_test {
 
         let action = plan_stack_action(&mock, &prs).await.unwrap();
         assert!(matches!(action, StackAction::Skip { .. }));
-        assert!(mock.get_find_stack_calls().is_empty());
+        assert_eq!(mock.get_find_stack_calls().len(), 0);
     }
 
     #[tokio::test]
@@ -684,7 +684,7 @@ mod stack_register_test {
 
         let action = plan_stack_action(&mock, &prs).await.unwrap();
         assert!(matches!(action, StackAction::ReorderConflict { .. }));
-        assert!(mock.get_create_stack_calls().is_empty());
+        assert_eq!(mock.get_create_stack_calls().len(), 0);
     }
 
     #[tokio::test]
@@ -733,8 +733,8 @@ mod stack_register_test {
 
         let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
         assert_eq!(soft, None);
-        assert!(mock.get_create_stack_calls().is_empty());
-        assert!(mock.get_add_to_stack_calls().is_empty());
+        assert_eq!(mock.get_create_stack_calls().len(), 0);
+        assert_eq!(mock.get_add_to_stack_calls().len(), 0);
     }
 
     #[tokio::test]
@@ -769,7 +769,7 @@ mod stack_register_test {
             soft.as_deref(),
             Some("Stack registration skipped: stacks endpoint not available")
         );
-        assert!(mock.get_create_stack_calls().is_empty());
+        assert_eq!(mock.get_create_stack_calls().len(), 0);
     }
 
     #[tokio::test]
@@ -880,7 +880,7 @@ mod sync_merged_test {
         let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
             .await
             .unwrap();
-        assert!(merged.is_empty());
+        assert_eq!(merged.len(), 0);
     }
 
     #[tokio::test]
@@ -890,8 +890,8 @@ mod sync_merged_test {
         let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
             .await
             .unwrap();
-        assert!(merged.is_empty());
-        assert!(mock.get_find_stack_calls().is_empty());
+        assert_eq!(merged.len(), 0);
+        assert_eq!(mock.get_find_stack_calls().len(), 0);
     }
 
     #[tokio::test]
@@ -902,7 +902,7 @@ mod sync_merged_test {
         let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
             .await
             .unwrap();
-        assert!(merged.is_empty());
+        assert_eq!(merged.len(), 0);
     }
 
     #[tokio::test]
@@ -912,7 +912,7 @@ mod sync_merged_test {
         let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
             .await
             .unwrap();
-        assert!(merged.is_empty());
+        assert_eq!(merged.len(), 0);
     }
 
     #[tokio::test]
@@ -922,8 +922,8 @@ mod sync_merged_test {
         let merged = detect_merged_layers(&mock, &tracked(), &HashMap::new())
             .await
             .unwrap();
-        assert!(merged.is_empty());
-        assert!(mock.get_find_stack_calls().is_empty());
+        assert_eq!(merged.len(), 0);
+        assert_eq!(mock.get_find_stack_calls().len(), 0);
     }
 }
 
@@ -1101,7 +1101,7 @@ mod execute_update_base_test {
         let outcome = execute_update_base(&mock, &make_update(1, "feat-a")).await;
 
         assert!(matches!(outcome, StepOutcome::Success(_)));
-        assert!(mock.get_unstack_calls().is_empty());
+        assert_eq!(mock.get_unstack_calls().len(), 0);
         assert_eq!(mock.get_update_base_calls().len(), 1);
     }
 
@@ -1112,8 +1112,8 @@ mod execute_update_base_test {
         let outcome = execute_update_base(&mock, &make_update(1, "feat-a")).await;
 
         assert!(matches!(outcome, StepOutcome::Success(_)));
-        assert!(mock.get_find_stack_calls().is_empty());
-        assert!(mock.get_unstack_calls().is_empty());
+        assert_eq!(mock.get_find_stack_calls().len(), 0);
+        assert_eq!(mock.get_unstack_calls().len(), 0);
     }
 
     #[tokio::test]
@@ -1135,7 +1135,7 @@ mod execute_update_base_test {
         let outcome = execute_update_base(&mock, &make_update(1, "feat-a")).await;
 
         assert!(matches!(outcome, StepOutcome::FatalError(_)));
-        assert!(mock.get_update_base_calls().is_empty());
+        assert_eq!(mock.get_update_base_calls().len(), 0);
     }
 }
 

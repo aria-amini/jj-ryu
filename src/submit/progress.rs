@@ -64,6 +64,10 @@ impl std::fmt::Display for PushStatus {
 /// - CLI implementations can print to terminal
 /// - Web servers can send SSE or WebSocket messages
 #[async_trait]
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to boxed futures"
+)]
 pub trait ProgressCallback: Send + Sync {
     /// Called when entering a new phase
     async fn on_phase(&self, phase: Phase);

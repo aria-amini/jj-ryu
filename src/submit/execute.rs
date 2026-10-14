@@ -362,7 +362,7 @@ mod tests {
     fn test_submission_result_new() {
         let result = SubmissionResult::new();
         assert!(result.success);
-        assert!(result.errors.is_empty());
+        assert_eq!(result.errors, Vec::<String>::new());
     }
 
     #[test]

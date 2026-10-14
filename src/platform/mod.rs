@@ -23,6 +23,10 @@ use async_trait::async_trait;
 /// This trait abstracts GitHub and GitLab operations, allowing the same
 /// submission logic to work with either platform.
 #[async_trait]
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to boxed futures"
+)]
 pub trait PlatformService: Send + Sync {
     /// Find an existing open PR for a head branch
     async fn find_existing_pr(&self, head_branch: &str) -> Result<Option<PullRequest>>;

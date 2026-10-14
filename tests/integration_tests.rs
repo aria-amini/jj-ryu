@@ -150,8 +150,8 @@ async fn test_full_submit_flow_new_stack() {
     assert_eq!(creates[1].base_branch, "feat-a");
 
     // Verify titles are not empty
-    assert!(!creates[0].title.is_empty());
-    assert!(!creates[1].title.is_empty());
+    assert_ne!(creates[0].title, "");
+    assert_ne!(creates[1].title, "");
 }
 
 #[tokio::test]

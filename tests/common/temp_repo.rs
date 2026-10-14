@@ -294,6 +294,6 @@ mod tests {
 
         let ws = repo.workspace();
         let bookmarks = ws.local_bookmarks().expect("get bookmarks");
-        assert!(!bookmarks.is_empty());
+        assert_ne!(bookmarks.len(), 0);
     }
 }
