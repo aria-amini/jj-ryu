@@ -47,6 +47,19 @@ pub fn analyze_submission(
     // Get segments from trunk (index 0) to target (inclusive)
     let relevant_segments = &stack.segments[0..=target_index];
 
+    // A pushed conflicted commit exposes jj's internal conflict trees
+    // (`.jjconflict-*`) on the forge. jj itself refuses such pushes.
+    if let Some(segment) = relevant_segments
+        .iter()
+        .find(|segment| segment.changes.iter().any(|c| c.has_conflict))
+    {
+        let name = segment
+            .bookmarks
+            .first()
+            .map_or_else(String::new, |b| b.name.clone());
+        return Err(Error::ConflictedCommit(name));
+    }
+
     // Narrow each segment to a single bookmark using heuristics
     let narrowed: Vec<NarrowedBookmarkSegment> = relevant_segments
         .iter()
@@ -235,9 +248,38 @@ mod tests {
             local_bookmarks: bookmarks.iter().map(ToString::to_string).collect(),
             remote_bookmarks: vec![],
             is_working_copy: false,
+            has_conflict: false,
             authored_at: Utc::now(),
             committed_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn test_analyze_submission_rejects_conflicted_commits() {
+        let mut conflicted = make_log_entry("Second change", &["feat-b"]);
+        conflicted.has_conflict = true;
+        let stack = BranchStack {
+            segments: vec![
+                BookmarkSegment {
+                    bookmarks: vec![make_bookmark("feat-a")],
+                    changes: vec![make_log_entry("First change", &["feat-a"])],
+                },
+                BookmarkSegment {
+                    bookmarks: vec![make_bookmark("feat-b")],
+                    changes: vec![conflicted],
+                },
+            ],
+        };
+        let graph = ChangeGraph {
+            stack: Some(stack),
+            ..Default::default()
+        };
+
+        let result = analyze_submission(&graph, Some("feat-b"));
+        assert!(matches!(result, Err(Error::ConflictedCommit(name)) if name == "feat-b"));
+
+        let lower = analyze_submission(&graph, Some("feat-a")).expect("lower layer is clean");
+        assert_eq!(lower.target_bookmark, "feat-a");
     }
 
     #[test]

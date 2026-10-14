@@ -432,6 +432,7 @@ impl JjWorkspace {
             local_bookmarks,
             remote_bookmarks,
             is_working_copy,
+            has_conflict: commit.has_conflict(),
             authored_at,
             committed_at,
         }
