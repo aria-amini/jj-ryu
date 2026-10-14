@@ -187,6 +187,15 @@ impl PlatformService for GitHubService {
         Ok(result)
     }
 
+    async fn is_pr_merged(&self, pr_number: u64) -> Result<bool> {
+        let pr = self
+            .client
+            .pulls(&self.config.owner, &self.config.repo)
+            .get(pr_number)
+            .await?;
+        Ok(pr.merged_at.is_some())
+    }
+
     async fn create_pr_with_options(
         &self,
         head: &str,

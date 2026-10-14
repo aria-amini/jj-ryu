@@ -31,6 +31,9 @@ pub trait PlatformService: Send + Sync {
     /// Find an existing open PR for a head branch
     async fn find_existing_pr(&self, head_branch: &str) -> Result<Option<PullRequest>>;
 
+    /// Check whether a PR is merged
+    async fn is_pr_merged(&self, pr_number: u64) -> Result<bool>;
+
     /// Create a new PR with default options (non-draft).
     ///
     /// This is a convenience method that delegates to [`create_pr_with_options`]

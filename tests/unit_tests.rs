@@ -836,7 +836,7 @@ mod stack_register_test {
 
 mod sync_merged_test {
     use crate::common::fixtures::{github_config, gitlab_config};
-    use crate::common::mock_platform::{MockPlatformService, make_stack, make_stack_with};
+    use crate::common::mock_platform::MockPlatformService;
     use jj_ryu::sync_merged::{MergedLayer, detect_merged_layers};
     use std::collections::HashMap;
 
@@ -858,7 +858,7 @@ mod sync_merged_test {
     #[tokio::test]
     async fn test_detect_merged_bottom() {
         let mock = MockPlatformService::with_config(github_config());
-        mock.set_stack_for_pr(1, Some(make_stack_with(7, &[1, 2, 3], &[1])));
+        mock.set_pr_merged(1);
 
         let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
             .await
@@ -875,7 +875,6 @@ mod sync_merged_test {
     #[tokio::test]
     async fn test_detect_none_merged() {
         let mock = MockPlatformService::with_config(github_config());
-        mock.set_stack_for_pr(1, Some(make_stack(7, &[1, 2, 3])));
 
         let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
             .await
@@ -883,47 +882,49 @@ mod sync_merged_test {
         assert_eq!(merged.len(), 0);
     }
 
+    /// GitHub dissolves a native stack when fewer than two PRs remain, so
+    /// detection must not depend on a stack.
     #[tokio::test]
-    async fn test_detect_skips_unsupported_platform() {
-        let mock = MockPlatformService::with_config(gitlab_config());
+    async fn test_detect_merged_without_native_stack() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.stacks_unavailable();
+        mock.set_pr_merged(3);
 
         let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
             .await
             .unwrap();
-        assert_eq!(merged.len(), 0);
+        assert_eq!(
+            merged,
+            vec![MergedLayer {
+                bookmark: "feat-3".to_string(),
+                pr_number: Some(3),
+            }]
+        );
         assert_eq!(mock.get_find_stack_calls().len(), 0);
     }
 
     #[tokio::test]
-    async fn test_detect_skips_when_stacks_unavailable() {
-        let mock = MockPlatformService::with_config(github_config());
-        mock.stacks_unavailable();
+    async fn test_detect_merged_on_gitlab() {
+        let mock = MockPlatformService::with_config(gitlab_config());
+        mock.set_pr_merged(1);
+        mock.set_pr_merged(2);
 
         let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
             .await
             .unwrap();
-        assert_eq!(merged.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_detect_skips_when_not_stacked() {
-        let mock = MockPlatformService::with_config(github_config());
-
-        let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
-            .await
-            .unwrap();
-        assert_eq!(merged.len(), 0);
+        let names: Vec<&str> = merged.iter().map(|m| m.bookmark.as_str()).collect();
+        assert_eq!(names, ["feat-1", "feat-2"]);
     }
 
     #[tokio::test]
     async fn test_detect_skips_without_cached_prs() {
         let mock = MockPlatformService::with_config(github_config());
+        mock.set_pr_merged(1);
 
         let merged = detect_merged_layers(&mock, &tracked(), &HashMap::new())
             .await
             .unwrap();
         assert_eq!(merged.len(), 0);
-        assert_eq!(mock.get_find_stack_calls().len(), 0);
     }
 }
 

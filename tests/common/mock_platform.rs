@@ -12,7 +12,7 @@ use jj_ryu::types::{
     MergeAsyncOutcome, MergeAsyncState, MergeOptions, Platform, PlatformConfig, PrStack,
     PrStackEntry, PrStackHead, PullRequest, StackRef,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -54,6 +54,7 @@ pub struct MockPlatformService {
     next_stack_number: AtomicU64,
     find_pr_responses: Mutex<HashMap<String, Option<PullRequest>>>,
     find_stack_responses: Mutex<HashMap<u64, Option<PrStack>>>,
+    merged_prs: Mutex<HashSet<u64>>,
     // Response for `unstack` (None = dissolved)
     unstack_response: Mutex<Option<PrStack>>,
     // Call tracking
@@ -90,6 +91,7 @@ impl MockPlatformService {
             next_stack_number: AtomicU64::new(1),
             find_pr_responses: Mutex::new(HashMap::new()),
             find_stack_responses: Mutex::new(HashMap::new()),
+            merged_prs: Mutex::new(HashSet::new()),
             unstack_response: Mutex::new(None),
             find_pr_calls: Mutex::new(Vec::new()),
             create_pr_calls: Mutex::new(Vec::new()),
@@ -113,6 +115,11 @@ impl MockPlatformService {
     }
 
     // === Error injection methods ===
+
+    /// Report a PR as merged from `is_pr_merged`
+    pub fn set_pr_merged(&self, pr_number: u64) {
+        self.merged_prs.lock().unwrap().insert(pr_number);
+    }
 
     /// Make `find_existing_pr` return an error
     pub fn fail_find_pr(&self, msg: &str) {
@@ -313,6 +320,10 @@ impl PlatformService for MockPlatformService {
 
         let responses = self.find_pr_responses.lock().unwrap();
         Ok(responses.get(head_branch).cloned().flatten())
+    }
+
+    async fn is_pr_merged(&self, pr_number: u64) -> Result<bool> {
+        Ok(self.merged_prs.lock().unwrap().contains(&pr_number))
     }
 
     async fn create_pr_with_options(
