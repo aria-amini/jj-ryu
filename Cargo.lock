@@ -2070,6 +2070,7 @@ dependencies = [
  "mockito",
  "octocrab",
  "owo-colors",
+ "pollster",
  "predicates",
  "regex",
  "reqwest",

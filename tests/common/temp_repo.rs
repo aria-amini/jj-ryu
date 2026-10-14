@@ -134,7 +134,7 @@ impl TempJjRepo {
 
     /// Run a jj command with arguments, returning stdout on success
     #[allow(dead_code)]
-    fn run_jj(&self, args: &[&str]) -> String {
+    pub fn run_jj(&self, args: &[&str]) -> String {
         let output = Command::new("jj")
             .args(args)
             .current_dir(self.dir.path())
