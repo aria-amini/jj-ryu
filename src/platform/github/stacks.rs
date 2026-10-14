@@ -146,10 +146,12 @@ impl GitHubService {
             StatusCode::ACCEPTED => {
                 let body: serde_json::Value = response.json().await?;
                 let uuid = body
-                    .get("uuid")
+                    .pointer("/details/uuid")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| {
-                        Error::GitHubApi("merge-async response missing uuid".to_string())
+                        Error::GitHubApi(
+                            "merge-async request accepted, but response missing details.uuid; check the PR on GitHub before retrying".to_string(),
+                        )
                     })?;
                 Ok(MergeAsyncOutcome::Accepted {
                     uuid: uuid.to_string(),
