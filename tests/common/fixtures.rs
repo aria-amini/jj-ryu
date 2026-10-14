@@ -60,7 +60,6 @@ pub fn make_log_entry_with_ids(
         local_bookmarks: bookmarks.iter().map(ToString::to_string).collect(),
         remote_bookmarks: vec![],
         is_working_copy: false,
-        has_conflict: false,
         authored_at: Utc::now(),
         committed_at: Utc::now(),
     }

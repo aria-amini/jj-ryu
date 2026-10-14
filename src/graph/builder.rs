@@ -147,7 +147,6 @@ mod tests {
             local_bookmarks: bookmarks.into_iter().map(String::from).collect(),
             remote_bookmarks: vec![],
             is_working_copy: false,
-            has_conflict: false,
             authored_at: Utc::now(),
             committed_at: Utc::now(),
         }
