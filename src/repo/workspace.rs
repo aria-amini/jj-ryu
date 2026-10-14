@@ -12,16 +12,19 @@ use jj_lib::git::{
 };
 use jj_lib::object_id::ObjectId;
 use jj_lib::op_store::{RefTarget, RemoteRef, RemoteRefState};
-use jj_lib::ref_name::{RefName, RemoteName};
+use jj_lib::ref_name::{RefName, RefNameBuf, RemoteName};
 use jj_lib::repo::{Repo, StoreFactories};
 use jj_lib::repo_path::RepoPathUiConverter;
 use jj_lib::revset::{
     self, RevsetExtensions, RevsetParseContext, RevsetWorkspaceContext, SymbolResolver,
 };
+use jj_lib::rewrite::rebase_commit;
 use jj_lib::settings::UserSettings;
 use jj_lib::str_util::{StringExpression, StringMatcher, StringPattern};
 use jj_lib::workspace::{Workspace, default_working_copy_factories};
+use pollster::FutureExt as _;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 /// Wrapper around jj-lib workspace and repository
@@ -70,8 +73,76 @@ fn find_workspace_dir(path: &Path) -> PathBuf {
         .unwrap_or(absolute)
 }
 
+/// Run the user's `jj` binary in the workspace
+///
+/// ryu links an older jj-lib than the user's `jj`. The `jj` binary owns the
+/// on-disk working copy so that its format, ignore rules, and snapshot limits
+/// stay consistent with the user's version and config.
+fn run_jj(workspace_root: &Path, args: &[&str]) -> Result<()> {
+    let output = Command::new("jj")
+        .args(args)
+        .current_dir(workspace_root)
+        .output()
+        .map_err(|e| Error::Workspace(format!("Failed to run jj {}: {e}", args.join(" "))))?;
+    if !output.status.success() {
+        return Err(Error::Workspace(format!(
+            "jj {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+/// Local bookmarks that match their remote bookmark, with their target
+fn synced_bookmark_targets(
+    repo: &jj_lib::repo::ReadonlyRepo,
+    remote: &RemoteName,
+) -> Vec<(RefNameBuf, CommitId)> {
+    let view = repo.view();
+    view.local_bookmarks()
+        .filter_map(|(name, target)| {
+            let local = target.as_normal()?;
+            let remote_ref = view.get_remote_bookmark(name.to_remote_symbol(remote));
+            (remote_ref.target.as_normal() == Some(local)).then(|| (name.to_owned(), local.clone()))
+        })
+        .collect()
+}
+
+/// Record server-side rewrites of synced bookmarks as commit rewrites
+///
+/// A forge can rewrite a branch, for example when GitHub rebases the rest of
+/// a stack after a merge. The import then abandons the old commit as
+/// unreachable, and jj rebases its descendants, including the working copy,
+/// onto the old parent. Recording old -> new instead keeps descendants on top
+/// of the bookmark.
+fn record_remote_rewrites(
+    mut_repo: &mut jj_lib::repo::MutableRepo,
+    synced_before: &[(RefNameBuf, CommitId)],
+) -> Result<()> {
+    for (name, old_id) in synced_before {
+        let new_target = mut_repo.view().get_local_bookmark(name);
+        let Some(new_id) = new_target.as_normal().cloned() else {
+            continue;
+        };
+        if &new_id == old_id
+            || mut_repo
+                .index()
+                .is_ancestor(old_id, &new_id)
+                .map_err(|e| Error::Git(format!("Failed to query index: {e}")))?
+        {
+            continue;
+        }
+        mut_repo.set_rewritten_commit(old_id.clone(), new_id);
+    }
+    Ok(())
+}
+
 impl JjWorkspace {
-    /// Open a jj workspace at the given path
+    /// Open a jj workspace, snapshotting the working copy first
+    ///
+    /// Without the snapshot, a later rewrite of the working-copy commit
+    /// orphans the unsnapshotted edits in a divergent commit.
     pub fn open(path: &Path) -> Result<Self> {
         let settings = create_user_settings()?;
         let workspace_root = find_workspace_dir(path);
@@ -83,6 +154,7 @@ impl JjWorkspace {
             &default_working_copy_factories(),
         )
         .map_err(|e| Error::Workspace(format!("Failed to open workspace: {e}")))?;
+        run_jj(&workspace_root, &["util", "snapshot"])?;
 
         Ok(Self {
             workspace,
@@ -476,6 +548,8 @@ impl JjWorkspace {
         let repo = self.repo()?;
         let git_settings = self.git_settings()?;
 
+        let synced_before = synced_bookmark_targets(&repo, RemoteName::new(remote));
+
         // Start a transaction for the fetch
         let mut tx = repo.start_transaction();
 
@@ -512,6 +586,8 @@ impl JjWorkspace {
         fetch
             .import_refs()
             .map_err(|e| Error::Git(format!("Failed to import refs: {e}")))?;
+
+        record_remote_rewrites(tx.repo_mut(), &synced_before)?;
 
         // Rebase descendants if there were any rewrites from the import
         // This is required before committing the transaction - see issue #8
@@ -618,6 +694,14 @@ impl JjWorkspace {
         Ok(())
     }
 
+    /// Check out the current working-copy commit on disk
+    ///
+    /// Operations that rewrite the working-copy commit leave the on-disk
+    /// working copy stale. Call this after them.
+    pub fn update_working_copy(&self) -> Result<()> {
+        run_jj(self.workspace_root(), &["workspace", "update-stale"])
+    }
+
     /// Abandon commits, reparenting their children onto the commits' parents
     pub fn abandon_commits(&mut self, commit_ids: &[String]) -> Result<()> {
         if commit_ids.is_empty() {
@@ -679,10 +763,8 @@ impl JjWorkspace {
                 continue;
             }
 
-            tx.repo_mut()
-                .rewrite_commit(&commit)
-                .set_parents(vec![trunk_commit.id().clone()])
-                .write()
+            rebase_commit(tx.repo_mut(), commit, vec![trunk_commit.id().clone()])
+                .block_on()
                 .map_err(|e| Error::Workspace(format!("Failed to rebase commit: {e}")))?;
             reparented += 1;
         }

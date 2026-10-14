@@ -141,7 +141,9 @@ Registered stacks get GitHub's native stack UI: a stack map in the merge box, la
 ryu sync
 ```
 
-This fetches from remote and syncs the current stack. On GitHub repos with stacked PRs, `ryu sync` also drops layers whose PRs have merged (deleting the local bookmark and PR cache entry) and rebases the remaining stack onto the updated trunk — GitHub's server-side rebase of the rest of the stack is reconciled automatically on the next push.
+This fetches from remote and syncs the current stack. `ryu sync` also drops layers whose PRs have merged (deleting the local bookmark and PR cache entry) and rebases the remaining stack onto the updated trunk. When GitHub rebases the rest of a stack server-side, the working copy follows the rebased bookmarks. ryu snapshots the working copy before it runs and updates it after sync, so uncommitted edits stay in place.
+
+`ryu submit` and `ryu sync` refuse to push conflicted commits. Resolve the conflicts with jj, then submit again.
 
 ### Merging (GitHub Stacks)
 
