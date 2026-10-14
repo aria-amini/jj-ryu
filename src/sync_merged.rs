@@ -67,7 +67,15 @@ pub fn apply_merged_layers(
             .map(|b| b.commit_id);
         workspace.delete_local_bookmark(&layer.bookmark)?;
         if let Some(tip) = tip {
-            workspace.abandon_commits(&[tip])?;
+            // Merges land bottom-up, so every local commit below a merged tip
+            // is on trunk. A rebase or merge-commit merge lands copies of all
+            // of them, not only of the tip.
+            let landed: Vec<String> = workspace
+                .resolve_revset(&format!("::{tip} ~ ::trunk()"))?
+                .into_iter()
+                .map(|entry| entry.commit_id)
+                .collect();
+            workspace.abandon_commits(&landed)?;
         }
         tracking.untrack(&layer.bookmark);
         pr_cache.remove(&layer.bookmark);

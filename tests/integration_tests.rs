@@ -726,3 +726,71 @@ fn test_ensure_no_conflicts_checks_pushed_range() {
     let lower = analyze_submission(&graph, Some("feat-a")).expect("analyze");
     ensure_no_conflicts(&workspace, &lower).expect("feat-a is clean");
 }
+
+/// A rebase merge lands copies of every commit in the layer on trunk. Sync
+/// must abandon all local commits of the layer, not only its tip, or the
+/// older commits come back as duplicates on top of trunk.
+#[test]
+fn test_sync_abandons_every_commit_of_rebase_merged_layer() {
+    use jj_ryu::tracking::{PrCache, TrackedBookmark, TrackingState};
+
+    let (_remote_dir, remote_path) = TempJjRepo::create_bare_remote();
+    let repo = TempJjRepo::new();
+    repo.add_remote("origin", &remote_path);
+    repo.run_jj(&["bookmark", "create", "main", "-r", "@-"]);
+    repo.push_bookmark("main", "origin");
+
+    for (file, message) in [("a1.txt", "feat-a part 1"), ("a2.txt", "feat-a part 2")] {
+        std::fs::write(repo.path().join(file), message).expect("write layer file");
+        repo.run_jj(&["commit", "-m", message]);
+    }
+    repo.run_jj(&["bookmark", "create", "feat-a", "-r", "@-"]);
+    repo.push_bookmark("feat-a", "origin");
+    std::fs::write(repo.path().join("wip.txt"), "wip").expect("write wip");
+
+    let server = TempDir::new().expect("create server clone dir");
+    let git = |args: &[&str]| {
+        let output = StdCommand::new("git")
+            .args(["-c", "user.name=GitHub", "-c", "user.email=gh@test.com"])
+            .args(args)
+            .current_dir(server.path())
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["clone", &remote_path.to_string_lossy(), "."]);
+    git(&["checkout", "-B", "main", "origin/main"]);
+    std::fs::write(server.path().join("other.txt"), "other").expect("write other");
+    git(&["add", "other.txt"]);
+    git(&["commit", "-m", "Unrelated change on main"]);
+    git(&["checkout", "-B", "feat-a", "origin/feat-a"]);
+    git(&["rebase", "main"]);
+    git(&["checkout", "main"]);
+    git(&["merge", "--ff-only", "feat-a"]);
+    git(&["push", "origin", "main"]);
+
+    let mut tracking = TrackingState::default();
+    tracking.track(TrackedBookmark::new(
+        "feat-a".to_string(),
+        "change".to_string(),
+    ));
+    let mut pr_cache = PrCache::new();
+    pr_cache.upsert("feat-a", &make_pr(1, "feat-a", "main"), "origin");
+    let workspace = sync_merged_layer(&repo, &mut tracking, &mut pr_cache, "feat-a", 1);
+
+    let trunk = workspace.resolve_revset("trunk()").unwrap();
+    let wc = workspace.resolve_revset("@").unwrap();
+    assert_eq!(wc[0].parents, vec![trunk[0].commit_id.clone()]);
+    assert_eq!(workspace.resolve_revset("trunk()..@").unwrap().len(), 1);
+    let status = repo.run_jj(&["status"]);
+    assert!(status.contains("wip.txt"), "wip edits lost: {status}");
+    assert!(
+        !status.contains("conflict"),
+        "conflicts after sync: {status}"
+    );
+}
