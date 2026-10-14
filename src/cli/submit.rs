@@ -10,7 +10,7 @@ use jj_ryu::platform::{PlatformService, create_platform_service, parse_repo_info
 use jj_ryu::repo::{JjWorkspace, select_remote};
 use jj_ryu::submit::{
     ExecutionStep, SubmissionAnalysis, SubmissionPlan, analyze_submission, create_submission_plan,
-    execute_submission, select_bookmark_for_segment,
+    ensure_no_conflicts, execute_submission, select_bookmark_for_segment,
 };
 use jj_ryu::tracking::{load_pr_cache, load_tracking, save_pr_cache};
 use jj_ryu::types::{ChangeGraph, NarrowedBookmarkSegment};
@@ -147,6 +147,8 @@ pub async fn run_submit(
             ));
         }
     }
+
+    ensure_no_conflicts(&workspace, &analysis)?;
 
     // Display what will be submitted
     print_submission_summary(&analysis, &options);

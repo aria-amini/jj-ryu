@@ -504,7 +504,6 @@ impl JjWorkspace {
             local_bookmarks,
             remote_bookmarks,
             is_working_copy,
-            has_conflict: commit.has_conflict(),
             authored_at,
             committed_at,
         }
@@ -692,6 +691,13 @@ impl JjWorkspace {
             .map_err(|e| Error::Workspace(format!("Failed to commit bookmark deletion: {e}")))?;
 
         Ok(())
+    }
+
+    /// Check whether any commit in the revset has unresolved conflicts
+    pub fn has_conflicts(&self, revset: &str) -> Result<bool> {
+        Ok(!self
+            .resolve_revset(&format!("({revset}) & conflicts()"))?
+            .is_empty())
     }
 
     /// Check out the current working-copy commit on disk

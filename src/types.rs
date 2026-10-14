@@ -40,8 +40,6 @@ pub struct LogEntry {
     pub remote_bookmarks: Vec<String>,
     /// Whether this is the working copy commit
     pub is_working_copy: bool,
-    /// Whether this commit has unresolved conflicts
-    pub has_conflict: bool,
     /// When the commit was authored
     pub authored_at: DateTime<Utc>,
     /// When the commit was committed

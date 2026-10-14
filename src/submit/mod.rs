@@ -12,8 +12,8 @@ mod progress;
 mod stack_register;
 
 pub use analysis::{
-    SubmissionAnalysis, analyze_submission, create_narrowed_segments, generate_pr_title,
-    get_base_branch, select_bookmark_for_segment,
+    SubmissionAnalysis, analyze_submission, create_narrowed_segments, ensure_no_conflicts,
+    generate_pr_title, get_base_branch, select_bookmark_for_segment,
 };
 pub use execute::{StepOutcome, SubmissionResult, execute_submission, execute_update_base};
 pub use plan::{

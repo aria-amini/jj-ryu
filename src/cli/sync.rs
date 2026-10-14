@@ -10,7 +10,8 @@ use jj_ryu::graph::build_change_graph;
 use jj_ryu::platform::{create_platform_service, parse_repo_info};
 use jj_ryu::repo::{JjWorkspace, select_remote};
 use jj_ryu::submit::{
-    SubmissionPlan, analyze_submission, create_submission_plan, execute_submission,
+    SubmissionPlan, analyze_submission, create_submission_plan, ensure_no_conflicts,
+    execute_submission,
 };
 use jj_ryu::sync_merged::{apply_merged_layers, detect_merged_layers};
 use jj_ryu::tracking::{load_pr_cache, load_tracking, save_pr_cache, save_tracking};
@@ -160,6 +161,8 @@ pub async fn run_sync(path: &Path, remote: Option<&str>, options: SyncOptions) -
             ));
         }
     }
+
+    ensure_no_conflicts(&workspace, &analysis)?;
 
     let plan =
         create_submission_plan(&analysis, platform.as_ref(), &remote_name, &default_branch).await?;
