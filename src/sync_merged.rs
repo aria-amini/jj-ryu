@@ -1,17 +1,17 @@
-//! Merged-layer handling for sync (native GitHub stacks)
+//! Merged-layer handling for sync
 //!
-//! After GitHub merges the bottom of a stack it retargets the remaining PRs
-//! and rebases their branches server-side. Locally, `ryu sync` drops the
-//! merged layers (bookmark, tracking entry, PR cache entry) and rebases the
-//! remaining stack onto trunk; the rewritten branches are then reconciled by
-//! the normal submit machinery (lease-protected force push with equivalent
-//! content).
+//! After GitHub merges the bottom of a native stack it retargets the
+//! remaining PRs and rebases their branches server-side. Locally, `ryu sync`
+//! drops the merged layers (bookmark, tracking entry, PR cache entry) and
+//! rebases the remaining stack onto trunk; the rewritten branches are then
+//! reconciled by the normal submit machinery (lease-protected force push with
+//! equivalent content).
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::platform::PlatformService;
 use crate::repo::JjWorkspace;
 use crate::tracking::{PrCache, TrackingState};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// A tracked bookmark whose PR has merged
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,46 +22,30 @@ pub struct MergedLayer {
     pub pr_number: Option<u64>,
 }
 
-/// Detect tracked bookmarks whose PRs have merged, via the native stack
+/// Detect tracked bookmarks whose PRs have merged
 ///
-/// Returns an empty vec when the platform doesn't support native stacks, no
-/// tracked bookmark has a cached PR, the PRs aren't stacked, or the Stacks
-/// API is unavailable for the repo.
+/// Checks each cached PR on its own. A native stack is not enough: GitHub
+/// dissolves a stack when fewer than two PRs remain, and chained PRs on other
+/// platforms have no stack at all.
 #[allow(clippy::implicit_hasher)]
 pub async fn detect_merged_layers(
     platform: &dyn PlatformService,
     tracked: &[String],
     pr_numbers: &HashMap<String, u64>,
 ) -> Result<Vec<MergedLayer>> {
-    if !platform.supports_native_stacks() || tracked.is_empty() {
-        return Ok(Vec::new());
+    let mut merged = Vec::new();
+    for bookmark in tracked {
+        let Some(&pr_number) = pr_numbers.get(bookmark) else {
+            continue;
+        };
+        if platform.is_pr_merged(pr_number).await? {
+            merged.push(MergedLayer {
+                bookmark: bookmark.clone(),
+                pr_number: Some(pr_number),
+            });
+        }
     }
-
-    let Some(lookup_pr) = tracked.iter().find_map(|b| pr_numbers.get(b)) else {
-        return Ok(Vec::new());
-    };
-
-    let stack = match platform.find_stack_for_pr(*lookup_pr).await {
-        Ok(Some(stack)) => stack,
-        Ok(None) | Err(Error::StacksUnavailable(_)) => return Ok(Vec::new()),
-        Err(e) => return Err(e),
-    };
-
-    let merged_refs: HashSet<&str> = stack
-        .pull_requests
-        .iter()
-        .filter(|e| e.merged_at.is_some())
-        .map(|e| e.head.ref_field.as_str())
-        .collect();
-
-    Ok(tracked
-        .iter()
-        .filter(|b| merged_refs.contains(b.as_str()))
-        .map(|b| MergedLayer {
-            bookmark: b.clone(),
-            pr_number: pr_numbers.get(b).copied(),
-        })
-        .collect())
+    Ok(merged)
 }
 
 /// Drop merged layers: delete local bookmarks, abandon the merged commits
