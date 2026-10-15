@@ -233,9 +233,8 @@ jobs:
 
   publish-npm:
     needs: [validate, prepare, build]
-    if: ${{ always() && needs.validate.result == 'success' && (inputs['npm-only'] || (needs.prepare.result == 'success' && needs.build.result == 'success')) }}
+    if: ${{ always() && github.repository_owner == 'dmmulroy' && needs.validate.result == 'success' && (inputs['npm-only'] || (needs.prepare.result == 'success' && needs.build.result == 'success')) }}
     runs-on: ubuntu-latest
-    if: github.repository_owner == 'dmmulroy'
 
     steps:
       - uses: actions/checkout@v6

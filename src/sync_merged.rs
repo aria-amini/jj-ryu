@@ -11,7 +11,7 @@ use crate::error::Result;
 use crate::platform::PlatformService;
 use crate::repo::JjWorkspace;
 use crate::tracking::{PrCache, TrackingState};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A tracked bookmark whose PR has merged
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +59,7 @@ pub fn apply_merged_layers(
     pr_cache: &mut PrCache,
     merged: &[MergedLayer],
 ) -> Result<usize> {
+    let merged_names: HashSet<&str> = merged.iter().map(|m| m.bookmark.as_str()).collect();
     for layer in merged {
         // Read the tip fresh each time: abandoning a lower layer rewrites
         // the commits (and bookmark targets) of the layers above it
@@ -67,11 +68,22 @@ pub fn apply_merged_layers(
             .map(|b| b.commit_id);
         workspace.delete_local_bookmark(&layer.bookmark)?;
         if let Some(tip) = tip {
-            // Merges land bottom-up, so every local commit below a merged tip
-            // is on trunk. A rebase or merge-commit merge lands copies of all
-            // of them, not only of the tip.
+            // A rebase or merge-commit merge lands copies of every commit
+            // below the tip, not only of the tip. A chained PR can also merge
+            // into an open base branch instead of trunk, so keep every commit
+            // that an open bookmark outside this layer's descendants needs.
+            let open: Vec<String> = workspace
+                .local_bookmarks()?
+                .into_iter()
+                .filter(|b| !merged_names.contains(b.name.as_str()))
+                .map(|b| b.commit_id)
+                .collect();
+            let mut landed_revset = format!("::{tip} ~ ::trunk()");
+            if !open.is_empty() {
+                landed_revset.push_str(&format!(" ~ ::(({}) ~ {tip}::)", open.join(" | ")));
+            }
             let landed: Vec<String> = workspace
-                .resolve_revset(&format!("::{tip} ~ ::trunk()"))?
+                .resolve_revset(&landed_revset)?
                 .into_iter()
                 .map(|entry| entry.commit_id)
                 .collect();
