@@ -106,7 +106,16 @@ pub trait PlatformService: Send + Sync {
         })
     }
 
-    /// Request an async merge of a stacked PR (merges it and all PRs below it)
+    /// Read the current PR head SHA to guard a merge against concurrent pushes.
+    async fn pr_head_sha(&self, pr_number: u64) -> Result<String> {
+        let _ = pr_number;
+        Err(Error::Unsupported {
+            feature: "PR head lookup",
+            platform: self.config().platform,
+        })
+    }
+
+    /// Request an async merge (includes lower PRs when the target is stacked)
     async fn merge_pr_async(
         &self,
         pr_number: u64,

@@ -152,17 +152,17 @@ When GitHub rebases the rest of a stack server-side, the working copy follows th
 
 `ryu submit` and `ryu sync` refuse to push conflicted commits. Resolve the conflicts with jj, then submit again.
 
-### Merging (GitHub Stacks)
+### Merging (GitHub)
 
 ```sh
-# Merge the bottom unmerged layer of the stack (squash by default)
+# Merge the bottom stack layer or the lone open submitted PR (squash by default)
 ryu merge
 
 # Merge through a specific layer (merges it and everything below it)
 ryu merge feat-b --method squash
 ```
 
-Stacked PRs must be merged via GitHub's async merge API: merging a PR merges every unmerged PR below it atomically, and GitHub retargets and rebases the rest of the stack server-side. Afterwards, run `ryu sync` to drop the merged layers locally.
+Standalone PRs use the same command: `ryu merge fix-bookmark`. With no bookmark, ryu selects the lone open submitted PR when no native stack is found; multiple standalone PRs require an explicit bookmark. Both standalone and stacked PRs use GitHub's async merge API. For native stacks, merging a PR merges every unmerged PR below it atomically, and GitHub retargets and rebases the rest of the stack server-side. Afterwards, run `ryu sync` to drop the merged layers locally.
 
 ### Unstacking
 
@@ -254,7 +254,7 @@ Commands:
   track    Track bookmarks for submission
   untrack  Stop tracking bookmarks
   sync     Sync all stacks with remote
-  merge    Merge a stacked PR and all PRs below it (GitHub Stacks)
+  merge    Merge a PR, including lower layers when it belongs to a native stack
   unstack  Remove all unmerged PRs from the native GitHub stack
   auth     Authentication management
 

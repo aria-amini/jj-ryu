@@ -1,4 +1,4 @@
-//! Merge command - merge a stacked PR and all PRs below it (GitHub Stacks)
+//! Merge command for standalone PRs and native GitHub stacks
 
 use crate::cli::common;
 use crate::cli::style::{Stylize, check, spinner_style};
@@ -6,11 +6,9 @@ use anstream::println;
 use dialoguer::Confirm;
 use indicatif::ProgressBar;
 use jj_ryu::error::{Error, Result};
-use jj_ryu::merge::{MergePlan, plan_merge, poll_merge};
-use jj_ryu::platform::PlatformService;
-use jj_ryu::tracking::{PrCache, load_pr_cache};
-use jj_ryu::types::{MergeAsyncOutcome, MergeAsyncState, MergeMethod, MergeOptions, PrStack};
-use jj_ryu::unstack::find_submitted_stack;
+use jj_ryu::merge::{MergePlan, MergeTarget, poll_merge, resolve_merge_target};
+use jj_ryu::tracking::load_pr_cache;
+use jj_ryu::types::{MergeAsyncOutcome, MergeAsyncState, MergeMethod, MergeOptions};
 use std::path::Path;
 use std::time::Duration;
 
@@ -30,44 +28,60 @@ pub async fn run_merge(
 
     if !ctx.platform.supports_native_stacks() {
         return Err(Error::Unsupported {
-            feature: "native stacked merge",
+            feature: "async merge",
             platform: ctx.platform.config().platform,
         });
     }
 
-    let pr_cache = load_pr_cache(&ctx.workspace_root).unwrap_or_default();
-
-    // Resolve the target PR: explicit bookmark, or bottom unmerged stack layer
-    let lookup_pr = match bookmark {
-        Some(bm) => resolve_bookmark_pr(ctx.platform.as_ref(), &pr_cache, bm).await?,
-        None => bottom_unmerged_pr(ctx.platform.as_ref(), &pr_cache).await?,
+    let mut pr_cache = load_pr_cache(&ctx.workspace_root)?;
+    pr_cache.prs.retain(|pr| pr.remote == ctx.remote_name);
+    let target = resolve_merge_target(ctx.platform.as_ref(), &pr_cache, bookmark).await?;
+    let (lookup_pr, plan) = match &target {
+        MergeTarget::Single(number) => (*number, None),
+        MergeTarget::Stack(plan) => (
+            plan.layers
+                .last()
+                .ok_or_else(|| Error::Internal("empty merge plan".into()))?
+                .number,
+            Some(plan),
+        ),
     };
 
-    let stack = find_stack(ctx.platform.as_ref(), lookup_pr).await?;
-    let plan = plan_merge(stack, lookup_pr)?;
+    let head_sha = if let Some(plan) = plan {
+        plan.layers.last().map(|entry| entry.head.sha.clone())
+    } else {
+        Some(ctx.platform.pr_head_sha(lookup_pr).await?)
+    };
 
-    print_merge_plan(&plan);
+    let prompt = plan.map_or_else(
+        || {
+            println!("Merging PR #{lookup_pr}:");
+            format!("Merge PR #{lookup_pr}?")
+        },
+        |plan| {
+            print_merge_plan(plan);
+            format!(
+                "Merge {} PR(s) from the bottom of stack #{}?",
+                plan.layers.len(),
+                plan.stack.number
+            )
+        },
+    );
 
-    if !yes {
-        let prompt = format!(
-            "Merge {} PR(s) from the bottom of stack #{}?",
-            plan.layers.len(),
-            plan.stack.number
-        );
-        if !Confirm::new()
+    if !yes
+        && !Confirm::new()
             .with_prompt(prompt)
             .default(false)
             .interact()
             .map_err(|e| Error::Internal(format!("Failed to read confirmation: {e}")))?
-        {
-            println!("{}", "Aborted.".muted());
-            return Ok(());
-        }
+    {
+        println!("{}", "Aborted.".muted());
+        return Ok(());
     }
 
     let options = MergeOptions {
         merge_method: method,
-        sha: plan.layers.last().map(|e| e.head.sha.clone()),
+        sha: head_sha,
         ..MergeOptions::default()
     };
 
@@ -77,7 +91,7 @@ pub async fn run_merge(
         .await
         .map_err(|e| match e {
             Error::MergeInProgress(msg) => Error::MergeInProgress(format!(
-                "{msg}; wait for it to finish or check the stack on GitHub"
+                "{msg}; wait for it to finish or check the PR on GitHub"
             )),
             other => other,
         })?;
@@ -135,80 +149,25 @@ pub async fn run_merge(
         }
     }
 
-    println!(
-        "{} Merged {} PR(s) from stack #{}",
-        check(),
-        plan.layers.len().to_string().accent(),
-        plan.stack.number
-    );
-    if !plan.remaining().is_empty() {
+    if let Some(plan) = plan {
         println!(
-            "{}",
-            "GitHub is rebasing the rest of the stack server-side.".muted()
+            "{} Merged {} PR(s) from stack #{}",
+            check(),
+            plan.layers.len().to_string().accent(),
+            plan.stack.number
         );
+        if !plan.remaining().is_empty() {
+            println!(
+                "{}",
+                "GitHub is rebasing the rest of the stack server-side.".muted()
+            );
+        }
+    } else {
+        println!("{} Merged PR #{lookup_pr}", check());
     }
     println!("Run {} to update your local stack.", "ryu sync".accent());
 
     Ok(())
-}
-
-/// Resolve a bookmark to its PR number (cache first, then the platform)
-async fn resolve_bookmark_pr(
-    platform: &dyn PlatformService,
-    pr_cache: &PrCache,
-    bookmark: &str,
-) -> Result<u64> {
-    if let Some(cached) = pr_cache.get(bookmark) {
-        return Ok(cached.number);
-    }
-    let pr = platform.find_existing_pr(bookmark).await?.ok_or_else(|| {
-        Error::InvalidArgument(format!("no open PR found for bookmark '{bookmark}'"))
-    })?;
-    Ok(pr.number)
-}
-
-/// Find the bottom unmerged entry of the native stack containing any cached PR
-async fn bottom_unmerged_pr(platform: &dyn PlatformService, pr_cache: &PrCache) -> Result<u64> {
-    let pr_numbers: Vec<u64> = pr_cache.prs.iter().map(|p| p.number).collect();
-    if pr_numbers.is_empty() {
-        return Err(Error::InvalidArgument(
-            "no submitted PRs found; run `ryu submit` first".to_string(),
-        ));
-    }
-    let stack = find_submitted_stack(platform, &pr_numbers)
-        .await?
-        .ok_or_else(|| {
-            Error::InvalidArgument(
-                "no submitted PR belongs to a native stack; merge it with `gh pr merge`"
-                    .to_string(),
-            )
-        })?;
-    stack
-        .pull_requests
-        .iter()
-        .find(|e| e.merged_at.is_none())
-        .map(|e| e.number)
-        .ok_or_else(|| {
-            Error::InvalidArgument(format!(
-                "every PR in stack #{} is already merged; run `ryu sync`",
-                stack.number
-            ))
-        })
-}
-
-/// Find the native stack for a PR with actionable error messages
-async fn find_stack(platform: &dyn PlatformService, pr_number: u64) -> Result<PrStack> {
-    let stack = platform.find_stack_for_pr(pr_number).await.map_err(|e| match e {
-        Error::StacksUnavailable(msg) => Error::StacksUnavailable(format!(
-            "{msg}; merge the bottom PR with a regular merge (`gh pr merge`) and rebase manually"
-        )),
-        other => other,
-    })?;
-    stack.ok_or_else(|| {
-        Error::InvalidArgument(format!(
-            "PR #{pr_number} is not in a native stack; merge it with `gh pr merge`"
-        ))
-    })
 }
 
 /// Print the layers that will merge and what remains

@@ -114,3 +114,74 @@ async fn accepted_merge_without_uuid_explains_that_request_was_accepted() {
     request.assert_async().await;
     drop(server);
 }
+
+#[tokio::test]
+async fn standalone_merge_uses_fetched_head_sha_and_selected_method() {
+    let mut server = mockito::Server::new_async().await;
+    let head = server
+        .mock("GET", "/repos/owner/repo/pulls/7")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"head":{"sha":"reviewed-head"}}"#)
+        .create_async()
+        .await;
+    let merge = server
+        .mock("PUT", "/repos/owner/repo/pulls/7/merge-async")
+        .match_body(mockito::Matcher::Json(serde_json::json!({
+            "sha": "reviewed-head", "merge_method": "rebase"
+        })))
+        .with_status(202)
+        .with_header("content-type", "application/json")
+        .with_body(r#"{"status":"pending","details":{"uuid":"single-id"}}"#)
+        .create_async()
+        .await;
+    let mut service =
+        GitHubService::new("test-token", "owner".into(), "repo".into(), None).unwrap();
+    service.api_base = server.url();
+    let sha = service.pr_head_sha(7).await.unwrap();
+    let outcome = service
+        .merge_pr_async(
+            7,
+            &MergeOptions {
+                sha: Some(sha),
+                merge_method: crate::types::MergeMethod::Rebase,
+                ..MergeOptions::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        MergeAsyncOutcome::Accepted {
+            uuid: "single-id".into()
+        }
+    );
+    head.assert_async().await;
+    merge.assert_async().await;
+    drop(server);
+}
+
+#[tokio::test]
+async fn head_lookup_requires_a_successful_response_with_a_sha() {
+    let mut server = mockito::Server::new_async().await;
+    let mut service =
+        GitHubService::new("test-token", "owner".into(), "repo".into(), None).unwrap();
+    service.api_base = server.url();
+    for (status, body, expected) in [
+        (200, r#"{"head":{}}"#, "missing head.sha"),
+        (200, r#"{"head":{"sha":""}}"#, "missing head.sha"),
+        (403, r#"{"message":"Forbidden"}"#, "403"),
+    ] {
+        let request = server
+            .mock("GET", "/repos/owner/repo/pulls/7")
+            .with_status(status)
+            .with_header("content-type", "application/json")
+            .with_body(body)
+            .create_async()
+            .await;
+        let error = service.pr_head_sha(7).await.unwrap_err();
+        assert!(error.to_string().contains(expected));
+        request.assert_async().await;
+    }
+    drop(server);
+}

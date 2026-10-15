@@ -159,7 +159,7 @@ pub struct PrStackHead {
     pub sha: String,
 }
 
-/// Merge method for async merges
+/// Merge method for standalone and stacked PRs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum MergeMethod {
