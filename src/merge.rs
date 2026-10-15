@@ -1,4 +1,4 @@
-//! Async merge orchestration for native GitHub stacks
+//! Merge target selection and async merge orchestration for GitHub PRs
 //!
 //! Stacked PRs must be merged via GitHub's async merge API: merging PR #k
 //! merges every unmerged PR below it atomically, and GitHub retargets and
@@ -6,8 +6,79 @@
 
 use crate::error::{Error, Result};
 use crate::platform::PlatformService;
+use crate::tracking::PrCache;
 use crate::types::{MergeAsyncState, PrStack, PrStackEntry};
+use crate::unstack::find_submitted_stack;
 use std::time::{Duration, Instant};
+
+/// A standalone PR or a native stack merge through a selected PR.
+#[derive(Debug)]
+pub enum MergeTarget {
+    /// A PR outside a native stack.
+    Single(u64),
+    /// A native stack with its affected layers.
+    Stack(MergePlan),
+}
+
+/// Resolve an explicit bookmark, the bottom native stack layer, or a lone open PR.
+///
+/// Callers must scope the cache to the selected remote. Multiple standalone PRs
+/// require an explicit bookmark; stale merged/closed entries are ignored.
+pub async fn resolve_merge_target(
+    platform: &dyn PlatformService,
+    pr_cache: &PrCache,
+    bookmark: Option<&str>,
+) -> Result<MergeTarget> {
+    if let Some(bookmark) = bookmark {
+        let number = platform
+            .find_existing_pr(bookmark)
+            .await?
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!("no open PR found for bookmark '{bookmark}'"))
+            })?
+            .number;
+        return match platform.find_stack_for_pr(number).await? {
+            Some(stack) => Ok(MergeTarget::Stack(plan_merge(stack, number)?)),
+            None => Ok(MergeTarget::Single(number)),
+        };
+    }
+
+    let numbers: Vec<_> = pr_cache.prs.iter().map(|pr| pr.number).collect();
+    if let Some(stack) = find_submitted_stack(platform, &numbers).await? {
+        let number = stack
+            .pull_requests
+            .iter()
+            .find(|entry| entry.merged_at.is_none())
+            .map(|entry| entry.number)
+            .ok_or_else(|| {
+                Error::InvalidArgument(format!(
+                    "every PR in stack #{} is already merged; run `ryu sync`",
+                    stack.number
+                ))
+            })?;
+        return Ok(MergeTarget::Stack(plan_merge(stack, number)?));
+    }
+
+    let mut open = Vec::new();
+    for cached in &pr_cache.prs {
+        if let Some(pr) = platform.find_existing_pr(&cached.bookmark).await?
+            && pr.number == cached.number
+            && !open.contains(&pr.number)
+        {
+            open.push(pr.number);
+        }
+    }
+    match open.as_slice() {
+        [number] => Ok(MergeTarget::Single(*number)),
+        [] => Err(Error::InvalidArgument(
+            "no open submitted PRs found; run `ryu submit` or specify a bookmark".to_string(),
+        )),
+        _ => Err(Error::InvalidArgument(
+            "multiple open PRs found outside a native stack; specify `ryu merge <bookmark>`"
+                .to_string(),
+        )),
+    }
+}
 
 /// Which stack layers a merge through a given PR will affect
 #[derive(Debug)]

@@ -1030,6 +1030,141 @@ mod merge_test {
     use jj_ryu::types::MergeAsyncState;
     use std::time::Duration;
 
+    fn submitted_cache(entries: &[(&str, u64)]) -> jj_ryu::tracking::PrCache {
+        let mut cache = jj_ryu::tracking::PrCache::new();
+        for (bookmark, number) in entries {
+            cache.upsert(
+                bookmark,
+                &crate::common::make_pr(*number, bookmark, "main"),
+                "origin",
+            );
+        }
+        cache
+    }
+
+    #[tokio::test]
+    async fn explicit_standalone_pr_refreshes_cached_bookmark() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_find_pr_response("fix", Some(crate::common::make_pr(7, "fix", "main")));
+        let target = jj_ryu::merge::resolve_merge_target(
+            &mock,
+            &submitted_cache(&[("fix", 7)]),
+            Some("fix"),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(target, jj_ryu::merge::MergeTarget::Single(7)));
+        assert_eq!(mock.get_find_pr_calls(), vec!["fix"]);
+    }
+
+    #[tokio::test]
+    async fn explicit_bookmark_rejects_a_stale_cached_pr() {
+        let mock = MockPlatformService::with_config(github_config());
+        let error = jj_ryu::merge::resolve_merge_target(
+            &mock,
+            &submitted_cache(&[("landed", 7)]),
+            Some("landed"),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no open PR found for bookmark 'landed'")
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_standalone_pr_can_be_resolved_without_cache() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_find_pr_response("fix", Some(crate::common::make_pr(7, "fix", "main")));
+        let target = jj_ryu::merge::resolve_merge_target(&mock, &submitted_cache(&[]), Some("fix"))
+            .await
+            .unwrap();
+        assert!(matches!(target, jj_ryu::merge::MergeTarget::Single(7)));
+    }
+
+    #[tokio::test]
+    async fn default_standalone_target_ignores_stale_prs_and_deduplicates_aliases() {
+        let mock = MockPlatformService::with_config(github_config());
+        for name in ["fix", "alias"] {
+            mock.set_find_pr_response(name, Some(crate::common::make_pr(7, "fix", "main")));
+        }
+        let target = jj_ryu::merge::resolve_merge_target(
+            &mock,
+            &submitted_cache(&[("landed", 2), ("fix", 7), ("alias", 7)]),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(target, jj_ryu::merge::MergeTarget::Single(7)));
+    }
+
+    #[tokio::test]
+    async fn default_target_refuses_ambiguous_standalone_prs() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_find_pr_response("a", Some(crate::common::make_pr(1, "a", "main")));
+        mock.set_find_pr_response("b", Some(crate::common::make_pr(2, "b", "main")));
+        let error = jj_ryu::merge::resolve_merge_target(
+            &mock,
+            &submitted_cache(&[("a", 1), ("b", 2)]),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("ryu merge <bookmark>"));
+    }
+
+    #[tokio::test]
+    async fn default_target_requires_an_open_submitted_pr() {
+        let mock = MockPlatformService::with_config(github_config());
+        for entries in [vec![], vec![("landed", 1)]] {
+            let error =
+                jj_ryu::merge::resolve_merge_target(&mock, &submitted_cache(&entries), None)
+                    .await
+                    .unwrap_err();
+            assert!(error.to_string().contains("no open submitted PRs"));
+        }
+    }
+
+    #[tokio::test]
+    async fn native_stack_selection_keeps_bottom_up_and_explicit_layer_behavior() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_stack_for_pr(3, Some(make_stack_with(9, &[1, 2, 3], &[1])));
+        mock.set_find_pr_response("top", Some(crate::common::make_pr(3, "top", "main")));
+        let cache = submitted_cache(&[("unstacked", 4), ("top", 3)]);
+        for (bookmark, expected) in [(None, vec![2]), (Some("top"), vec![2, 3])] {
+            let target = jj_ryu::merge::resolve_merge_target(&mock, &cache, bookmark)
+                .await
+                .unwrap();
+            let jj_ryu::merge::MergeTarget::Stack(plan) = target else {
+                panic!("expected a native stack plan");
+            };
+            assert_eq!(
+                plan.layers
+                    .iter()
+                    .map(|entry| entry.number)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stack_lookup_errors_do_not_fall_back_to_single_pr_merge() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.fail_find_stack("lookup failed");
+        mock.set_find_pr_response("fix", Some(crate::common::make_pr(7, "fix", "main")));
+        let error = jj_ryu::merge::resolve_merge_target(
+            &mock,
+            &submitted_cache(&[("fix", 7)]),
+            Some("fix"),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("lookup failed"));
+    }
+
     #[test]
     fn test_plan_merge_bottom_target_merges_only_itself() {
         let stack = make_stack(7, &[1, 2, 3]);

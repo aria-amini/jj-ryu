@@ -311,6 +311,27 @@ impl PlatformService for GitHubService {
         self.stacks_unstack(stack_number).await
     }
 
+    async fn pr_head_sha(&self, pr_number: u64) -> Result<String> {
+        let response = self
+            .stacks_http
+            .get(format!("{}/pulls/{pr_number}", self.repo_route()))
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(Error::GitHubApi(format!(
+                "read PR #{pr_number} head failed ({status}): {}",
+                response.text().await.unwrap_or_default()
+            )));
+        }
+        let body: serde_json::Value = response.json().await?;
+        body.pointer("/head/sha")
+            .and_then(serde_json::Value::as_str)
+            .filter(|sha| !sha.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| Error::GitHubApi(format!("PR #{pr_number} missing head.sha")))
+    }
+
     async fn merge_pr_async(
         &self,
         pr_number: u64,

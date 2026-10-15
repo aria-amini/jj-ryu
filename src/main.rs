@@ -138,9 +138,9 @@ enum Commands {
         remote: Option<String>,
     },
 
-    /// Merge a stacked PR and all PRs below it (GitHub Stacks)
+    /// Merge a PR, including lower layers when it belongs to a native stack
     Merge {
-        /// Bookmark to merge through (defaults to the bottom unmerged layer)
+        /// Bookmark to merge (defaults to the bottom stack layer or lone open PR)
         bookmark: Option<String>,
 
         /// Merge method
