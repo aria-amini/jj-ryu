@@ -2,9 +2,12 @@
 //!
 //! These tests require:
 //! - `JJ_RYU_E2E_TESTS=1` environment variable
-//! - `gh` CLI authenticated with repo scope
+//! - `gh` CLI authenticated with repo scope (or `GH_TOKEN`)
 //! - `jj` CLI installed
-//! - Test repo: `dmmulroy/jj-ryu-test`
+//! - Test repo: `dmmulroy/jj-ryu-test` (override with `JJ_RYU_E2E_OWNER` and
+//!   `JJ_RYU_E2E_REPO`)
+//!
+//! CI runs these tests only from the manual `E2E` workflow.
 //!
 //! Run with: `JJ_RYU_E2E_TESTS=1 cargo test --test e2e_tests -- --include-ignored`
 

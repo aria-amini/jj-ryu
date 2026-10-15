@@ -1,0 +1,62 @@
+name: E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: Disposable owner/name repository where the tests create and merge PRs
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Parallel runs against one repository interfere with each other's PRs.
+concurrency:
+  group: e2e-${{ inputs.repository }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check test repository access
+        env:
+          GH_TOKEN: ${{ secrets.TEST_GITHUB_TOKEN }}
+          E2E_REPOSITORY: ${{ inputs.repository }}
+        run: |
+          test -n "$GH_TOKEN" || { echo "::error::TEST_GITHUB_TOKEN secret is not set"; exit 1; }
+          gh repo view "$E2E_REPOSITORY" --json nameWithOwner --jq .nameWithOwner
+
+      # `ryu submit` pushes through plain git, which has no credentials otherwise.
+      # The helper reads GH_TOKEN at push time, so the token is not stored on disk.
+      - name: Configure git credentials
+        env:
+          GH_TOKEN: ${{ secrets.TEST_GITHUB_TOKEN }}
+        run: gh auth setup-git
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install jj
+        run: cargo install --locked jj-cli --version 0.46.0
+
+      - name: Run E2E tests
+        env:
+          GH_TOKEN: ${{ secrets.TEST_GITHUB_TOKEN }}
+          E2E_REPOSITORY: ${{ inputs.repository }}
+        run: |
+          export JJ_RYU_E2E_TESTS=1
+          export JJ_RYU_E2E_OWNER="${E2E_REPOSITORY%%/*}"
+          export JJ_RYU_E2E_REPO="${E2E_REPOSITORY#*/}"
+          cargo test --test e2e_tests -- --ignored
