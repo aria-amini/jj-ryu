@@ -62,6 +62,8 @@ Uses (in order):
 
 For GitHub Enterprise: `export GH_HOST=github.mycompany.com`
 
+The default `gh` OAuth token scopes are sufficient for the Stacks API and async merge endpoint — no extra authentication setup is needed. On repositories where GitHub stacked PRs aren't available (e.g. some GHES versions), ryu falls back to plain chained PRs: submit succeeds without native stack registration, and `ryu merge`/`ryu unstack` report that the feature is unavailable.
+
 ### GitLab
 
 Uses (in order):
@@ -131,18 +133,9 @@ Tracking state is stored in `.jj/ryu/tracking.json` per workspace.
 ryu submit
 ```
 
-This pushes all tracked bookmarks in the current stack, creates PRs for any without one, updates PR base branches, and adds stack navigation comments. Untracked bookmarks are skipped with a warning.
+This pushes all tracked bookmarks in the current stack, creates PRs for any without one, updates PR base branches, and registers them as a native [GitHub stack](https://docs.github.com/en/pull-requests/get-started/about-stacked-prs) (on repositories where stacked PRs are available). Untracked bookmarks are skipped with a warning.
 
-Each PR gets a comment showing the full stack:
-
-```
-* #13
-* **#12 👈**
-* #11
-
----
-This stack of pull requests is managed by jj-ryu.
-```
+Registered stacks get GitHub's native stack UI: a stack map in the merge box, layer navigation, and server-side cascading rebases after merges.
 
 ### Syncing
 
@@ -150,7 +143,27 @@ This stack of pull requests is managed by jj-ryu.
 ryu sync
 ```
 
-This fetches from remote and syncs the current stack.
+This fetches from remote and syncs the current stack. `ryu sync` also drops layers whose PRs have merged (deleting the local bookmark and PR cache entry) and rebases the remaining stack onto the updated trunk.
+
+### Merging (GitHub Stacks)
+
+```sh
+# Merge the bottom unmerged layer of the stack (squash by default)
+ryu merge
+
+# Merge through a specific layer (merges it and everything below it)
+ryu merge feat-b --method squash
+```
+
+Stacked PRs must be merged via GitHub's async merge API: merging a PR merges every unmerged PR below it atomically, and GitHub retargets and rebases the rest of the stack server-side. Afterwards, run `ryu sync` to drop the merged layers locally.
+
+### Unstacking
+
+```sh
+ryu unstack
+```
+
+Removes all unmerged PRs from the native GitHub stack (the PRs, branches, and local bookmarks are left untouched). Useful before restructuring a stack, since GitHub stacks are additive-only.
 
 ## Workflow example
 
@@ -179,9 +192,11 @@ ryu submit
 jj commit -m "Address review feedback"
 ryu submit
 
-# After feat-auth merges, rebase and re-submit
-jj rebase -d main
-ryu submit
+# Merge the bottom PR (and everything below it) once approved
+ryu merge feat-auth
+
+# Drop the merged layers and rebase the rest
+ryu sync
 ```
 
 ## Advanced options
@@ -232,6 +247,8 @@ Commands:
   track    Track bookmarks for submission
   untrack  Stop tracking bookmarks
   sync     Sync all stacks with remote
+  merge    Merge a stacked PR and all PRs below it (GitHub Stacks)
+  unstack  Remove all unmerged PRs from the native GitHub stack
   auth     Authentication management
 
 Options:
@@ -287,6 +304,27 @@ Options:
       --dry-run          Preview without making changes
   -c, --confirm          Preview and prompt for confirmation
       --stack <BOOKMARK> Only sync this stack
+      --remote <REMOTE>  Git remote (default: origin)
+```
+
+### merge
+
+```
+ryu merge [BOOKMARK] [OPTIONS]
+
+Options:
+      --method <METHOD>  Merge method: merge, squash (default), or rebase
+  -y, --yes              Skip confirmation
+      --remote <REMOTE>  Git remote (default: origin)
+```
+
+### unstack
+
+```
+ryu unstack [OPTIONS]
+
+Options:
+  -y, --yes              Skip confirmation
       --remote <REMOTE>  Git remote (default: origin)
 ```
 

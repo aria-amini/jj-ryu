@@ -200,6 +200,9 @@ pub async fn run_submit(
     // Update PR cache with results
     if !options.dry_run && result.success {
         let mut pr_cache = load_pr_cache(&workspace_root).unwrap_or_default();
+        for (bookmark, pr) in &plan.existing_prs {
+            pr_cache.upsert(bookmark, pr, &remote_name);
+        }
         for pr in result.created_prs.iter().chain(result.updated_prs.iter()) {
             pr_cache.upsert(&pr.head_ref, pr, &remote_name);
         }
@@ -211,16 +214,29 @@ pub async fn run_submit(
     if !options.dry_run {
         println!();
         if result.success {
-            println!(
-                "{} {} bookmark{}",
-                format!("{CHECK} Successfully submitted").success(),
-                analysis.segments.len().accent(),
+            let count = format!(
+                "{} bookmark{}",
+                analysis.segments.len(),
                 if analysis.segments.len() == 1 {
                     ""
                 } else {
                     "s"
                 }
             );
+            if result.errors.is_empty() {
+                println!(
+                    "{}",
+                    format!("{CHECK} Successfully submitted {count}").success()
+                );
+            } else {
+                println!(
+                    "{}",
+                    format!("{CHECK} Submitted {count} with warnings").warn()
+                );
+                for err in &result.errors {
+                    println!("  {}", err.error());
+                }
+            }
 
             if !result.created_prs.is_empty() {
                 println!(

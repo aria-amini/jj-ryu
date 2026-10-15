@@ -16,8 +16,8 @@ pub enum Phase {
     Planning,
     /// Executing submission operations (push, create, update, publish)
     Executing,
-    /// Adding/updating stack comments
-    AddingComments,
+    /// Registering PRs as a native GitHub stack
+    RegisteringStack,
     /// Submission complete
     Complete,
 }
@@ -28,7 +28,7 @@ impl std::fmt::Display for Phase {
             Self::Analyzing => write!(f, "Analyzing"),
             Self::Planning => write!(f, "Planning"),
             Self::Executing => write!(f, "Executing"),
-            Self::AddingComments => write!(f, "Updating stack comments"),
+            Self::RegisteringStack => write!(f, "Registering stack"),
             Self::Complete => write!(f, "Done"),
         }
     }
@@ -64,6 +64,10 @@ impl std::fmt::Display for PushStatus {
 /// - CLI implementations can print to terminal
 /// - Web servers can send SSE or WebSocket messages
 #[async_trait]
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait adds must_use to boxed futures"
+)]
 pub trait ProgressCallback: Send + Sync {
     /// Called when entering a new phase
     async fn on_phase(&self, phase: Phase);

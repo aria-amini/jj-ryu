@@ -17,11 +17,14 @@
 pub mod auth;
 pub mod error;
 pub mod graph;
+pub mod merge;
 pub mod platform;
 pub mod repo;
 pub mod submit;
+pub mod sync_merged;
 pub mod tracking;
 pub mod types;
+pub mod unstack;
 
 pub use error::{Error, Result};
 pub use types::*;

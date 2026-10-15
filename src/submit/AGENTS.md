@@ -12,7 +12,8 @@ Three-phase submission engine: analysis → plan → execute. Handles stack orde
 |------|---------|
 | `analysis.rs` | Build `ChangeGraph`, identify bookmarks to submit |
 | `plan.rs` | Create `SubmissionPlan` with typed constraints + topo sort |
-| `execute.rs` | Execute plan: push, create PRs, update bases, stack comments |
+| `execute.rs` | Execute plan: push, create PRs, update bases |
+| `stack_register.rs` | Register submitted PRs as a native GitHub stack (soft-fail) |
 | `progress.rs` | `ProgressCallback` trait for CLI feedback |
 | `mod.rs` | Re-exports |
 
@@ -29,7 +30,7 @@ enum ExecutionConstraint {
     PushBeforeRetarget { base: PushRef, pr: UpdateRef }, // Can't retarget to non-existent branch
     RetargetBeforePush { pr: UpdateRef, old_base: PushRef }, // SWAP: move off before pushing
     PushBeforeCreate { push: PushRef, create: CreateRef },
-    CreateOrder { parent: CreateRef, child: CreateRef }, // Stack comment linking
+    CreateOrder { parent: CreateRef, child: CreateRef }, // Stack base chaining
 }
 ```
 
@@ -65,7 +66,7 @@ if current_pos > bookmark_pos {
 | Add new step type | `ExecutionStep` enum in `plan.rs`, add to `execute_step()` |
 | Add constraint type | `ExecutionConstraint` enum, add typed ref if needed, impl `resolve()` |
 | Change PR creation | `execute_create_pr()` in `execute.rs` |
-| Change stack comments | `format_stack_comment()`, `COMMENT_DATA_PREFIX` |
+| Change stack registration | `plan_stack_action()`, `execute_stack_registration()` in `stack_register.rs` |
 | Debug scheduling | `RUST_LOG=jj_ryu::submit::plan=trace` |
 
 ## ANTI-PATTERNS

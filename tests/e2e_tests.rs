@@ -9,7 +9,6 @@
 //! Run with: `JJ_RYU_E2E_TESTS=1 cargo test --test e2e_tests -- --include-ignored`
 
 use jj_ryu::platform::{GitHubService, PlatformService};
-use jj_ryu::submit::STACK_COMMENT_THIS_PR;
 use jj_ryu::types::Platform;
 use std::env;
 use std::path::PathBuf;
@@ -19,6 +18,16 @@ use uuid::Uuid;
 
 const TEST_OWNER: &str = "dmmulroy";
 const TEST_REPO: &str = "jj-ryu-test";
+
+/// Test repo owner (override with `JJ_RYU_E2E_OWNER`)
+fn test_owner() -> String {
+    env::var("JJ_RYU_E2E_OWNER").unwrap_or_else(|_| TEST_OWNER.to_string())
+}
+
+/// Test repo name (override with `JJ_RYU_E2E_REPO`)
+fn test_repo() -> String {
+    env::var("JJ_RYU_E2E_REPO").unwrap_or_else(|_| TEST_REPO.to_string())
+}
 
 /// Check if E2E tests should run
 fn e2e_enabled() -> bool {
@@ -48,7 +57,7 @@ fn unique_branch(prefix: &str) -> String {
 }
 
 fn repo_spec() -> String {
-    format!("{TEST_OWNER}/{TEST_REPO}")
+    format!("{}/{}", test_owner(), test_repo())
 }
 
 // =============================================================================
@@ -68,7 +77,7 @@ impl TestContext {
         }
 
         let token = get_gh_token()?;
-        let service = GitHubService::new(&token, TEST_OWNER.into(), TEST_REPO.into(), None).ok()?;
+        let service = GitHubService::new(&token, test_owner(), test_repo(), None).ok()?;
 
         Some(Self {
             service,
@@ -415,26 +424,6 @@ fn get_pr_base(pr_number: u64) -> Option<String> {
     )
 }
 
-fn get_pr_comments(pr_number: u64) -> Vec<String> {
-    // Use JSON array output to handle multi-line comment bodies correctly
-    let output = Command::new("gh")
-        .args([
-            "api",
-            &format!("repos/{}/issues/{pr_number}/comments", repo_spec()),
-            "--jq",
-            "[.[].body]",
-        ])
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            let json_str = String::from_utf8_lossy(&o.stdout);
-            serde_json::from_str::<Vec<String>>(&json_str).unwrap_or_default()
-        }
-        _ => vec![],
-    }
-}
-
 fn merge_pr(pr_number: u64) -> bool {
     let output = Command::new("gh")
         .args([
@@ -506,6 +495,75 @@ fn cleanup_branches_and_prs(branches: &[String], prs: &[u64]) {
             ])
             .output();
     }
+}
+
+// =============================================================================
+// Stacks API Helpers
+// =============================================================================
+
+const STACKS_API_VERSION_HEADER: &str = "X-GitHub-Api-Version: 2026-03-10";
+
+/// Find the native stack containing a PR (returns the stack number)
+fn find_stack_number_for_pr(pr_number: u64) -> Option<u64> {
+    let output = Command::new("gh")
+        .args([
+            "api",
+            &format!("repos/{}/stacks?pull_request={pr_number}", repo_spec()),
+            "-H",
+            STACKS_API_VERSION_HEADER,
+            "--jq",
+            ".[0].number",
+        ])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+    } else {
+        None
+    }
+}
+
+/// PR numbers in a native stack, ordered bottom to top
+fn stack_pr_numbers(stack_number: u64) -> Option<Vec<u64>> {
+    let output = Command::new("gh")
+        .args([
+            "api",
+            &format!("repos/{}/stacks/{stack_number}", repo_spec()),
+            "-H",
+            STACKS_API_VERSION_HEADER,
+            "--jq",
+            "[.pull_requests[].number] | join(\" \")",
+        ])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Some(
+            text.split_whitespace()
+                .filter_map(|n| n.parse().ok())
+                .collect(),
+        )
+    } else {
+        None
+    }
+}
+
+/// Unstack a native stack via the API (test cleanup)
+fn unstack_api(stack_number: u64) -> bool {
+    let output = Command::new("gh")
+        .args([
+            "api",
+            "-X",
+            "POST",
+            &format!("repos/{}/stacks/{stack_number}/unstack", repo_spec()),
+            "-H",
+            STACKS_API_VERSION_HEADER,
+        ])
+        .output();
+
+    output.is_ok_and(|o| o.status.success())
 }
 
 // =============================================================================
@@ -621,51 +679,6 @@ async fn test_update_pr_base() {
         .expect("update base");
 
     assert_eq!(updated.base_ref, "main");
-
-    ctx.cleanup();
-}
-
-#[tokio::test]
-#[ignore = "E2E test requiring JJ_RYU_E2E_TESTS=1"]
-async fn test_pr_comments() {
-    let Some(mut ctx) = TestContext::new() else {
-        eprintln!("Skipping: set JJ_RYU_E2E_TESTS=1");
-        return;
-    };
-
-    let branch = unique_branch("comments");
-    ctx.track_branch(&branch);
-
-    assert!(ctx.push_branch(&branch, "comment test"));
-
-    let pr = ctx
-        .service
-        .create_pr(&branch, "main", "Comment test")
-        .await
-        .expect("create PR");
-    ctx.track_pr(pr.number);
-
-    ctx.service
-        .create_pr_comment(pr.number, "E2E test comment")
-        .await
-        .expect("create comment");
-
-    let comments = ctx
-        .service
-        .list_pr_comments(pr.number)
-        .await
-        .expect("list comments");
-
-    assert!(!comments.is_empty());
-    assert_eq!(comments[0].body, "E2E test comment");
-
-    ctx.service
-        .update_pr_comment(pr.number, comments[0].id, "Updated")
-        .await
-        .expect("update comment");
-
-    let comments = ctx.service.list_pr_comments(pr.number).await.unwrap();
-    assert_eq!(comments[0].body, "Updated");
 
     ctx.cleanup();
 }
@@ -825,73 +838,6 @@ async fn test_submit_idempotent() {
     // Same PR number (not duplicated)
     let pr_num2 = find_pr_number(&bookmarks[0]).expect("PR should still exist");
     assert_eq!(pr_num, pr_num2);
-
-    repo.cleanup();
-}
-
-#[tokio::test]
-#[ignore = "E2E test requiring JJ_RYU_E2E_TESTS=1"]
-async fn test_stack_comments() {
-    let Some(mut repo) = E2ERepo::new() else {
-        eprintln!("Skipping: set JJ_RYU_E2E_TESTS=1");
-        return;
-    };
-
-    // Create 3-level stack
-    let bookmarks = repo.build_stack(&[
-        ("stack-1", "First"),
-        ("stack-2", "Second"),
-        ("stack-3", "Third"),
-    ]);
-
-    let output = repo.submit(&bookmarks[2]);
-    assert!(
-        output.status.success(),
-        "submit failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // Collect PR numbers for all bookmarks
-    let pr_numbers: Vec<u64> = bookmarks
-        .iter()
-        .map(|b| find_pr_number(b).expect("PR should exist"))
-        .collect();
-
-    // Check stack comments on each PR
-    for (i, _bookmark) in bookmarks.iter().enumerate() {
-        let pr_num = pr_numbers[i];
-        let comments = get_pr_comments(pr_num);
-
-        // Must have stack comment with JJ-RYU marker
-        let stack_comment = comments
-            .iter()
-            .find(|c| c.contains("<!--- JJ-RYU_STACK:"))
-            .unwrap_or_else(|| panic!("PR #{pr_num} missing JJ-RYU stack comment"));
-
-        // All PRs in stack should be referenced
-        for &other_pr in &pr_numbers {
-            assert!(
-                stack_comment.contains(&format!("#{other_pr}")),
-                "Stack comment on PR #{pr_num} missing reference to #{other_pr}"
-            );
-        }
-
-        // Current PR must have marker
-        assert!(
-            stack_comment.contains(&format!("#{pr_num} {STACK_COMMENT_THIS_PR}")),
-            "PR #{pr_num} missing {STACK_COMMENT_THIS_PR} marker for current position. Comment: {stack_comment}"
-        );
-
-        // Other PRs should NOT have marker
-        for (j, &other_pr) in pr_numbers.iter().enumerate() {
-            if j != i {
-                assert!(
-                    !stack_comment.contains(&format!("#{other_pr} {STACK_COMMENT_THIS_PR}")),
-                    "PR #{other_pr} incorrectly has {STACK_COMMENT_THIS_PR} marker on PR #{pr_num}'s comment"
-                );
-            }
-        }
-    }
 
     repo.cleanup();
 }
@@ -1334,5 +1280,136 @@ async fn test_insert_middle_of_stack() {
         "C should now target B after insert"
     );
 
+    repo.cleanup();
+}
+
+// =============================================================================
+// Native GitHub Stacks E2E Tests
+// =============================================================================
+
+#[tokio::test]
+#[ignore = "E2E test requiring JJ_RYU_E2E_TESTS=1"]
+async fn test_submit_registers_native_stack() {
+    let Some(mut repo) = E2ERepo::new() else {
+        eprintln!("Skipping: set JJ_RYU_E2E_TESTS=1");
+        return;
+    };
+
+    let bookmarks = repo.build_stack(&[("feat-a", "Add feature A"), ("feat-b", "Add feature B")]);
+
+    let output = repo.submit(&bookmarks[1]);
+    assert!(
+        output.status.success(),
+        "submit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let pr_a = find_pr_number(&bookmarks[0]).expect("PR for feat-a not found");
+    let pr_b = find_pr_number(&bookmarks[1]).expect("PR for feat-b not found");
+
+    let Some(stack_number) = find_stack_number_for_pr(pr_a) else {
+        panic!("no native stack found for PR #{pr_a} (stacks may be unavailable for this repo)");
+    };
+    assert_eq!(
+        stack_pr_numbers(stack_number),
+        Some(vec![pr_a, pr_b]),
+        "native stack should contain both PRs bottom to top"
+    );
+
+    unstack_api(stack_number);
+    repo.cleanup();
+}
+
+#[tokio::test]
+#[ignore = "E2E test requiring JJ_RYU_E2E_TESTS=1"]
+async fn test_unstack_command() {
+    let Some(mut repo) = E2ERepo::new() else {
+        eprintln!("Skipping: set JJ_RYU_E2E_TESTS=1");
+        return;
+    };
+
+    let bookmarks = repo.build_stack(&[("feat-a", "Add feature A"), ("feat-b", "Add feature B")]);
+
+    let output = repo.submit(&bookmarks[1]);
+    assert!(
+        output.status.success(),
+        "submit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let pr_a = find_pr_number(&bookmarks[0]).expect("PR for feat-a not found");
+    let Some(_stack_number) = find_stack_number_for_pr(pr_a) else {
+        panic!("no native stack found for PR #{pr_a} (stacks may be unavailable for this repo)");
+    };
+
+    let output = repo.run_ryu(&["unstack", "--yes"]);
+    assert!(
+        output.status.success(),
+        "unstack failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        find_stack_number_for_pr(pr_a),
+        None,
+        "stack should be dissolved after ryu unstack"
+    );
+
+    repo.cleanup();
+}
+
+#[tokio::test]
+#[ignore = "E2E test requiring JJ_RYU_E2E_TESTS=1"]
+async fn test_merge_command() {
+    let Some(mut repo) = E2ERepo::new() else {
+        eprintln!("Skipping: set JJ_RYU_E2E_TESTS=1");
+        return;
+    };
+
+    let bookmarks = repo.build_stack(&[("feat-a", "Add feature A"), ("feat-b", "Add feature B")]);
+
+    let output = repo.submit(&bookmarks[1]);
+    assert!(
+        output.status.success(),
+        "submit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let pr_a = find_pr_number(&bookmarks[0]).expect("PR for feat-a not found");
+    let pr_b = find_pr_number(&bookmarks[1]).expect("PR for feat-b not found");
+    assert!(
+        find_stack_number_for_pr(pr_a).is_some(),
+        "no native stack found for PR #{pr_a} (stacks may be unavailable for this repo)"
+    );
+
+    // Merge the bottom layer (squash by default)
+    let output = repo.run_ryu(&["merge", &bookmarks[0], "--yes"]);
+    assert!(
+        output.status.success(),
+        "merge failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        wait_for_pr_merged(pr_a, std::time::Duration::from_secs(60)).await,
+        "feat-a PR should be merged"
+    );
+
+    // GitHub retargets the remaining PR to the stack base
+    let start = std::time::Instant::now();
+    let retargeted = loop {
+        if get_pr_base(pr_b).as_deref() == Some("main") {
+            break true;
+        }
+        if start.elapsed() > std::time::Duration::from_secs(60) {
+            break false;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    };
+    assert!(retargeted, "feat-b PR should be retargeted to main");
+
+    if let Some(stack_number) = find_stack_number_for_pr(pr_b) {
+        unstack_api(stack_number);
+    }
     repo.cleanup();
 }

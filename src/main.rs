@@ -126,6 +126,35 @@ enum Commands {
         #[arg(long, short)]
         all: bool,
     },
+
+    /// Remove all unmerged PRs from the native GitHub stack
+    Unstack {
+        /// Skip confirmation
+        #[arg(long, short = 'y')]
+        yes: bool,
+
+        /// Git remote
+        #[arg(long)]
+        remote: Option<String>,
+    },
+
+    /// Merge a stacked PR and all PRs below it (GitHub Stacks)
+    Merge {
+        /// Bookmark to merge through (defaults to the bottom unmerged layer)
+        bookmark: Option<String>,
+
+        /// Merge method
+        #[arg(long, value_enum, default_value = "squash")]
+        method: jj_ryu::types::MergeMethod,
+
+        /// Skip confirmation
+        #[arg(long, short = 'y')]
+        yes: bool,
+
+        /// Git remote
+        #[arg(long)]
+        remote: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -151,6 +180,7 @@ enum AuthAction {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let path = cli.path.unwrap_or_else(|| PathBuf::from("."));
@@ -247,6 +277,17 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Untrack { bookmarks, all }) => {
             cli::run_untrack(&path, &bookmarks, cli::UntrackOptions { all }).await?;
+        }
+        Some(Commands::Unstack { yes, remote }) => {
+            cli::run_unstack(&path, remote.as_deref(), yes).await?;
+        }
+        Some(Commands::Merge {
+            bookmark,
+            method,
+            yes,
+            remote,
+        }) => {
+            cli::run_merge(&path, bookmark.as_deref(), method, yes, remote.as_deref()).await?;
         }
     }
 

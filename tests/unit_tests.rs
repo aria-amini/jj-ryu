@@ -635,206 +635,602 @@ mod plan_test {
     }
 }
 
-mod stack_comment_test {
+mod stack_register_test {
+    use crate::common::fixtures::{github_config, gitlab_config, make_bookmark};
+    use crate::common::mock_platform::{MockPlatformService, make_stack};
+    use jj_ryu::error::Error;
     use jj_ryu::submit::{
-        COMMENT_DATA_PREFIX, STACK_COMMENT_THIS_PR, StackCommentData, StackItem, SubmissionPlan,
-        build_stack_comment_data, format_stack_comment,
+        NoopProgress, StackAction, SubmissionPlan, execute_stack_registration, plan_stack_action,
     };
-    use jj_ryu::types::{Bookmark, NarrowedBookmarkSegment, PullRequest};
+    use jj_ryu::types::{NarrowedBookmarkSegment, PullRequest};
     use std::collections::HashMap;
 
-    fn make_bookmark(name: &str) -> Bookmark {
-        Bookmark {
-            name: name.to_string(),
-            commit_id: format!("{name}_commit"),
-            change_id: format!("{name}_change"),
-            has_remote: false,
-            is_synced: false,
-        }
-    }
-
-    fn make_pr(number: u64, bookmark: &str) -> PullRequest {
-        PullRequest {
-            number,
-            html_url: format!("https://github.com/test/test/pull/{number}"),
-            base_ref: "main".to_string(),
-            head_ref: bookmark.to_string(),
-            title: format!("PR for {bookmark}"),
-            node_id: Some(format!("PR_node_{number}")),
-            is_draft: false,
-        }
-    }
-
-    fn make_stack_item(name: &str, number: u64) -> StackItem {
-        StackItem {
-            bookmark_name: name.to_string(),
-            pr_url: format!("https://github.com/test/test/pull/{number}"),
-            pr_number: number,
-            pr_title: format!("feat: {name}"),
-        }
-    }
-
-    #[test]
-    fn test_build_stack_comment_data_single_pr() {
-        let plan = SubmissionPlan {
-            segments: vec![NarrowedBookmarkSegment {
-                bookmark: make_bookmark("feat-a"),
-                changes: vec![],
-            }],
+    fn make_plan(names: &[&str]) -> SubmissionPlan {
+        SubmissionPlan {
+            segments: names
+                .iter()
+                .map(|n| NarrowedBookmarkSegment {
+                    bookmark: make_bookmark(n),
+                    changes: vec![],
+                })
+                .collect(),
             constraints: vec![],
             execution_steps: vec![],
             existing_prs: HashMap::new(),
             remote: "origin".to_string(),
             default_branch: "main".to_string(),
-        };
-
-        let mut bookmark_to_pr = HashMap::new();
-        bookmark_to_pr.insert("feat-a".to_string(), make_pr(1, "feat-a"));
-
-        let data = build_stack_comment_data(&plan, &bookmark_to_pr);
-
-        assert_eq!(data.version, 1);
-        assert_eq!(data.base_branch, "main");
-        assert_eq!(data.stack.len(), 1);
-        assert_eq!(data.stack[0].bookmark_name, "feat-a");
-        assert_eq!(data.stack[0].pr_number, 1);
+        }
     }
 
-    #[test]
-    fn test_build_stack_comment_data_three_pr_stack() {
-        let plan = SubmissionPlan {
-            segments: vec![
-                NarrowedBookmarkSegment {
-                    bookmark: make_bookmark("feat-a"),
-                    changes: vec![],
-                },
-                NarrowedBookmarkSegment {
-                    bookmark: make_bookmark("feat-b"),
-                    changes: vec![],
-                },
-                NarrowedBookmarkSegment {
-                    bookmark: make_bookmark("feat-c"),
-                    changes: vec![],
-                },
-            ],
-            constraints: vec![],
-            execution_steps: vec![],
-            existing_prs: HashMap::new(),
-            remote: "origin".to_string(),
-            default_branch: "main".to_string(),
-        };
-
-        let mut bookmark_to_pr = HashMap::new();
-        bookmark_to_pr.insert("feat-a".to_string(), make_pr(1, "feat-a"));
-        bookmark_to_pr.insert("feat-b".to_string(), make_pr(2, "feat-b"));
-        bookmark_to_pr.insert("feat-c".to_string(), make_pr(3, "feat-c"));
-
-        let data = build_stack_comment_data(&plan, &bookmark_to_pr);
-
-        assert_eq!(data.stack.len(), 3);
-        assert_eq!(data.stack[0].pr_number, 1);
-        assert_eq!(data.stack[1].pr_number, 2);
-        assert_eq!(data.stack[2].pr_number, 3);
+    /// PRs with base/head continuity: #1 main->feat-a, #2 feat-a->feat-b, ...
+    fn make_chain(names: &[&str], start: u64) -> Vec<PullRequest> {
+        let mut prs = Vec::new();
+        let mut base = "main".to_string();
+        for (i, name) in names.iter().enumerate() {
+            let number = start + i as u64;
+            prs.push(PullRequest {
+                number,
+                html_url: format!("https://github.com/test/repo/pull/{number}"),
+                base_ref: base.clone(),
+                head_ref: name.to_string(),
+                title: format!("PR for {name}"),
+                node_id: Some(format!("PR_node_{number}")),
+                is_draft: false,
+            });
+            base = name.to_string();
+        }
+        prs
     }
 
-    #[test]
-    fn test_format_body_marks_current_pr() {
-        let data = StackCommentData {
-            version: 1,
-            stack: vec![make_stack_item("feat-a", 1), make_stack_item("feat-b", 2)],
-            base_branch: "main".to_string(),
-        };
+    #[tokio::test]
+    async fn test_plan_create_when_no_stack_exists() {
+        let mock = MockPlatformService::with_config(github_config());
+        let prs = make_chain(&["feat-a", "feat-b"], 1);
 
-        // Format for second PR (index 1)
-        let body = format_stack_comment(&data, 1).unwrap();
+        let action = plan_stack_action(&mock, &prs).await.unwrap();
+        assert_eq!(action, StackAction::Create { prs: vec![1, 2] });
+    }
 
-        // PR #2 should have the marker
-        assert!(
-            body.contains(&format!("#{} {STACK_COMMENT_THIS_PR}", 2)),
-            "body should mark PR #2 as current: {body}"
-        );
+    #[tokio::test]
+    async fn test_plan_noop_on_exact_match() {
+        let mock = MockPlatformService::with_config(github_config());
+        let prs = make_chain(&["feat-a", "feat-b"], 1);
+        mock.set_stack_for_pr(1, Some(make_stack(7, &[1, 2])));
 
-        // PR #1 should NOT have the marker
-        assert!(
-            !body.contains(&format!("#{} {STACK_COMMENT_THIS_PR}", 1)),
-            "body should NOT mark PR #1 as current: {body}"
+        let action = plan_stack_action(&mock, &prs).await.unwrap();
+        assert_eq!(action, StackAction::NoOp { stack_number: 7 });
+    }
+
+    #[tokio::test]
+    async fn test_plan_add_when_remote_is_prefix() {
+        let mock = MockPlatformService::with_config(github_config());
+        let prs = make_chain(&["feat-a", "feat-b", "feat-c"], 1);
+        mock.set_stack_for_pr(1, Some(make_stack(7, &[1, 2])));
+
+        let action = plan_stack_action(&mock, &prs).await.unwrap();
+        assert_eq!(
+            action,
+            StackAction::Add {
+                stack_number: 7,
+                delta: vec![3]
+            }
         );
     }
 
-    #[test]
-    fn test_format_body_reverse_order() {
-        let data = StackCommentData {
-            version: 1,
-            stack: vec![
-                make_stack_item("feat-a", 1),
-                make_stack_item("feat-b", 2),
-                make_stack_item("feat-c", 3),
-            ],
-            base_branch: "main".to_string(),
-        };
+    #[tokio::test]
+    async fn test_plan_noop_when_local_is_bottom_slice_of_remote() {
+        let mock = MockPlatformService::with_config(github_config());
+        // e.g. `ryu submit --upto feat-b` against a taller registered stack
+        let prs = make_chain(&["feat-a", "feat-b"], 1);
+        mock.set_stack_for_pr(1, Some(make_stack(7, &[1, 2, 3])));
 
-        let body = format_stack_comment(&data, 0).unwrap();
-
-        // Find positions of each PR in the body
-        let pos_1 = body.find("#1").expect("should contain #1");
-        let pos_2 = body.find("#2").expect("should contain #2");
-        let pos_3 = body.find("#3").expect("should contain #3");
-
-        // Reverse order means #3 (leaf) comes first, #1 (root) comes last
-        assert!(pos_3 < pos_2, "PR #3 should appear before #2");
-        assert!(pos_2 < pos_1, "PR #2 should appear before #1");
+        let action = plan_stack_action(&mock, &prs).await.unwrap();
+        assert_eq!(action, StackAction::NoOp { stack_number: 7 });
     }
 
-    #[test]
-    fn test_format_body_contains_marker() {
-        let data = StackCommentData {
-            version: 1,
-            stack: vec![make_stack_item("feat-a", 1)],
-            base_branch: "main".to_string(),
-        };
+    #[tokio::test]
+    async fn test_plan_reorder_conflict() {
+        let mock = MockPlatformService::with_config(github_config());
+        let prs = make_chain(&["feat-a", "feat-b"], 1);
+        // Remote stack has a different order / extra PR in the middle
+        mock.set_stack_for_pr(1, Some(make_stack(7, &[1, 9, 2])));
 
-        let body = format_stack_comment(&data, 0).unwrap();
+        let action = plan_stack_action(&mock, &prs).await.unwrap();
+        assert!(matches!(action, StackAction::ReorderConflict { .. }));
+    }
 
-        assert!(
-            body.contains(COMMENT_DATA_PREFIX),
-            "body should contain data prefix"
+    #[tokio::test]
+    async fn test_plan_spans_two_stacks_conflict() {
+        let mock = MockPlatformService::with_config(github_config());
+        let prs = make_chain(&["feat-a", "feat-b"], 1);
+        mock.set_stack_for_pr(1, Some(make_stack(7, &[1])));
+        mock.set_stack_for_pr(2, Some(make_stack(8, &[2])));
+
+        let action = plan_stack_action(&mock, &prs).await.unwrap();
+        assert!(matches!(action, StackAction::ReorderConflict { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_plan_skip_single_pr() {
+        let mock = MockPlatformService::with_config(github_config());
+        let prs = make_chain(&["feat-a"], 1);
+
+        let action = plan_stack_action(&mock, &prs).await.unwrap();
+        assert!(matches!(action, StackAction::Skip { .. }));
+        assert_eq!(mock.get_find_stack_calls().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_plan_skip_on_gitlab() {
+        let mock = MockPlatformService::with_config(gitlab_config());
+        let prs = make_chain(&["feat-a", "feat-b"], 1);
+
+        let action = plan_stack_action(&mock, &prs).await.unwrap();
+        assert!(matches!(action, StackAction::Skip { .. }));
+        assert_eq!(mock.get_find_stack_calls().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_plan_broken_continuity_conflict() {
+        let mock = MockPlatformService::with_config(github_config());
+        let mut prs = make_chain(&["feat-a", "feat-b"], 1);
+        prs[1].base_ref = "main".to_string(); // breaks the chain
+
+        let action = plan_stack_action(&mock, &prs).await.unwrap();
+        assert!(matches!(action, StackAction::ReorderConflict { .. }));
+        assert_eq!(mock.get_create_stack_calls().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_execute_creates_stack() {
+        let mock = MockPlatformService::with_config(github_config());
+        let prs = make_chain(&["feat-a", "feat-b"], 1);
+        let plan = make_plan(&["feat-a", "feat-b"]);
+        let bookmark_to_pr: HashMap<String, PullRequest> = prs
+            .into_iter()
+            .map(|pr| (pr.head_ref.clone(), pr))
+            .collect();
+
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        assert_eq!(soft, None);
+        assert_eq!(mock.get_create_stack_calls(), vec![vec![1, 2]]);
+    }
+
+    #[tokio::test]
+    async fn test_execute_adds_delta() {
+        let mock = MockPlatformService::with_config(github_config());
+        let prs = make_chain(&["feat-a", "feat-b", "feat-c"], 1);
+        mock.set_stack_for_pr(1, Some(make_stack(7, &[1, 2])));
+        let plan = make_plan(&["feat-a", "feat-b", "feat-c"]);
+        let bookmark_to_pr: HashMap<String, PullRequest> = prs
+            .into_iter()
+            .map(|pr| (pr.head_ref.clone(), pr))
+            .collect();
+
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        assert_eq!(soft, None);
+        assert_eq!(mock.get_add_to_stack_calls().len(), 1);
+        assert_eq!(mock.get_add_to_stack_calls()[0].stack_number, 7);
+        assert_eq!(mock.get_add_to_stack_calls()[0].pull_requests, vec![3]);
+    }
+
+    #[tokio::test]
+    async fn test_execute_noop_makes_no_writes() {
+        let mock = MockPlatformService::with_config(github_config());
+        let prs = make_chain(&["feat-a", "feat-b"], 1);
+        mock.set_stack_for_pr(1, Some(make_stack(7, &[1, 2])));
+        let plan = make_plan(&["feat-a", "feat-b"]);
+        let bookmark_to_pr: HashMap<String, PullRequest> = prs
+            .into_iter()
+            .map(|pr| (pr.head_ref.clone(), pr))
+            .collect();
+
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        assert_eq!(soft, None);
+        assert_eq!(mock.get_create_stack_calls().len(), 0);
+        assert_eq!(mock.get_add_to_stack_calls().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_execute_reorder_conflict_soft_fails() {
+        let mock = MockPlatformService::with_config(github_config());
+        let prs = make_chain(&["feat-a", "feat-b"], 1);
+        mock.set_stack_for_pr(1, Some(make_stack(7, &[2, 1])));
+        let plan = make_plan(&["feat-a", "feat-b"]);
+        let bookmark_to_pr: HashMap<String, PullRequest> = prs
+            .into_iter()
+            .map(|pr| (pr.head_ref.clone(), pr))
+            .collect();
+
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        assert!(soft.is_some());
+        assert!(soft.unwrap().contains("unstack"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_stacks_unavailable_soft_warns() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.stacks_unavailable();
+        let prs = make_chain(&["feat-a", "feat-b"], 1);
+        let plan = make_plan(&["feat-a", "feat-b"]);
+        let bookmark_to_pr: HashMap<String, PullRequest> = prs
+            .into_iter()
+            .map(|pr| (pr.head_ref.clone(), pr))
+            .collect();
+
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        assert_eq!(
+            soft.as_deref(),
+            Some("Stack registration skipped: stacks endpoint not available")
+        );
+        assert_eq!(mock.get_create_stack_calls().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_execute_api_error_soft_fails() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.fail_create_stack("422 unprocessable");
+        let prs = make_chain(&["feat-a", "feat-b"], 1);
+        let plan = make_plan(&["feat-a", "feat-b"]);
+        let bookmark_to_pr: HashMap<String, PullRequest> = prs
+            .into_iter()
+            .map(|pr| (pr.head_ref.clone(), pr))
+            .collect();
+
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        assert_eq!(
+            soft.as_deref(),
+            Some("Stack registration failed: platform error: 422 unprocessable")
         );
     }
 
-    #[test]
-    fn test_format_body_contains_base_branch() {
-        let data = StackCommentData {
-            version: 1,
-            stack: vec![make_stack_item("feat-a", 1)],
-            base_branch: "develop".to_string(),
-        };
+    #[tokio::test]
+    async fn test_execute_add_retries_on_conflict_then_succeeds() {
+        let mock = MockPlatformService::with_config(github_config());
+        let prs = make_chain(&["feat-a", "feat-b", "feat-c"], 1);
+        mock.set_stack_for_pr(1, Some(make_stack(7, &[1, 2])));
+        mock.conflict_add_to_stack(1);
+        let plan = make_plan(&["feat-a", "feat-b", "feat-c"]);
+        let bookmark_to_pr: HashMap<String, PullRequest> = prs
+            .into_iter()
+            .map(|pr| (pr.head_ref.clone(), pr))
+            .collect();
 
-        let body = format_stack_comment(&data, 0).unwrap();
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        assert_eq!(soft, None);
+        assert_eq!(mock.get_add_to_stack_calls().len(), 2);
+    }
 
-        assert!(
-            body.contains("`develop`"),
-            "body should contain base branch: {body}"
-        );
+    #[tokio::test]
+    async fn test_execute_add_conflict_exhaustion_soft_fails() {
+        let mock = MockPlatformService::with_config(github_config());
+        let prs = make_chain(&["feat-a", "feat-b", "feat-c"], 1);
+        mock.set_stack_for_pr(1, Some(make_stack(7, &[1, 2])));
+        mock.conflict_add_to_stack(10);
+        let plan = make_plan(&["feat-a", "feat-b", "feat-c"]);
+        let bookmark_to_pr: HashMap<String, PullRequest> = prs
+            .into_iter()
+            .map(|pr| (pr.head_ref.clone(), pr))
+            .collect();
+
+        let soft = execute_stack_registration(&mock, &plan, &bookmark_to_pr, &NoopProgress).await;
+        assert!(soft.is_some());
+        assert_eq!(mock.get_add_to_stack_calls().len(), 4);
     }
 
     #[test]
-    fn test_format_body_github_no_duplicate_title() {
-        // GitHub format should NOT contain PR title since GitHub auto-expands #N references
-        let data = StackCommentData {
-            version: 1,
-            stack: vec![make_stack_item("feat-a", 1)],
-            base_branch: "main".to_string(),
-        };
-
-        let body = format_stack_comment(&data, 0).unwrap();
-
-        // Should contain the PR number reference
-        assert!(body.contains("#1"), "body should contain #1: {body}");
-        // Should NOT contain the PR title (GitHub will auto-expand it)
-        assert!(
-            !body.contains("feat: feat-a"),
-            "body should NOT contain PR title (GitHub auto-expands): {body}"
+    fn test_error_display_stacks_unavailable() {
+        let err = Error::StacksUnavailable("not enabled".to_string());
+        assert_eq!(
+            err.to_string(),
+            "GitHub stacked PRs unavailable: not enabled"
         );
+    }
+}
+
+mod sync_merged_test {
+    use crate::common::fixtures::{github_config, gitlab_config};
+    use crate::common::mock_platform::MockPlatformService;
+    use jj_ryu::sync_merged::{MergedLayer, detect_merged_layers};
+    use std::collections::HashMap;
+
+    fn tracked() -> Vec<String> {
+        vec![
+            "feat-1".to_string(),
+            "feat-2".to_string(),
+            "feat-3".to_string(),
+        ]
+    }
+
+    fn pr_numbers() -> HashMap<String, u64> {
+        [("feat-1", 1), ("feat-2", 2), ("feat-3", 3)]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_detect_merged_bottom() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_pr_merged(1);
+
+        let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
+            .await
+            .unwrap();
+        assert_eq!(
+            merged,
+            vec![MergedLayer {
+                bookmark: "feat-1".to_string(),
+                pr_number: Some(1),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_detect_none_merged() {
+        let mock = MockPlatformService::with_config(github_config());
+
+        let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
+            .await
+            .unwrap();
+        assert_eq!(merged.len(), 0);
+    }
+
+    /// GitHub dissolves a native stack when fewer than two PRs remain, so
+    /// detection must not depend on a stack.
+    #[tokio::test]
+    async fn test_detect_merged_without_native_stack() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.stacks_unavailable();
+        mock.set_pr_merged(3);
+
+        let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
+            .await
+            .unwrap();
+        assert_eq!(
+            merged,
+            vec![MergedLayer {
+                bookmark: "feat-3".to_string(),
+                pr_number: Some(3),
+            }]
+        );
+        assert_eq!(mock.get_find_stack_calls().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_detect_merged_on_gitlab() {
+        let mock = MockPlatformService::with_config(gitlab_config());
+        mock.set_pr_merged(1);
+        mock.set_pr_merged(2);
+
+        let merged = detect_merged_layers(&mock, &tracked(), &pr_numbers())
+            .await
+            .unwrap();
+        let names: Vec<&str> = merged.iter().map(|m| m.bookmark.as_str()).collect();
+        assert_eq!(names, ["feat-1", "feat-2"]);
+    }
+
+    #[tokio::test]
+    async fn test_detect_skips_without_cached_prs() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_pr_merged(1);
+
+        let merged = detect_merged_layers(&mock, &tracked(), &HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(merged.len(), 0);
+    }
+}
+
+mod merge_test {
+    use crate::common::fixtures::github_config;
+    use crate::common::mock_platform::{MockPlatformService, make_stack, make_stack_with};
+    use jj_ryu::error::Error;
+    use jj_ryu::merge::{plan_merge, poll_merge};
+    use jj_ryu::types::MergeAsyncState;
+    use std::time::Duration;
+
+    #[test]
+    fn test_plan_merge_bottom_target_merges_only_itself() {
+        let stack = make_stack(7, &[1, 2, 3]);
+        let plan = plan_merge(stack, 1).unwrap();
+        assert_eq!(plan.layers.len(), 1);
+        assert_eq!(plan.layers[0].number, 1);
+        assert_eq!(plan.remaining().len(), 2);
+    }
+
+    #[test]
+    fn test_plan_merge_mid_target_merges_below() {
+        let stack = make_stack(7, &[1, 2, 3]);
+        let plan = plan_merge(stack, 2).unwrap();
+        let numbers: Vec<u64> = plan.layers.iter().map(|e| e.number).collect();
+        assert_eq!(numbers, vec![1, 2]);
+        assert_eq!(plan.remaining().len(), 1);
+    }
+
+    #[test]
+    fn test_plan_merge_excludes_already_merged_below() {
+        let stack = make_stack_with(7, &[1, 2, 3], &[1]);
+        let plan = plan_merge(stack, 3).unwrap();
+        let numbers: Vec<u64> = plan.layers.iter().map(|e| e.number).collect();
+        assert_eq!(numbers, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_plan_merge_errors_on_merged_target() {
+        let stack = make_stack_with(7, &[1, 2], &[1]);
+        let err = plan_merge(stack, 1).unwrap_err();
+        assert!(err.to_string().contains("already merged"));
+    }
+
+    #[test]
+    fn test_plan_merge_errors_when_pr_not_in_stack() {
+        let stack = make_stack(7, &[1, 2]);
+        assert!(matches!(plan_merge(stack, 9), Err(Error::Internal(_))));
+    }
+
+    #[tokio::test]
+    async fn test_poll_merge_pending_then_merged() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_poll_responses(vec![MergeAsyncState::Pending, MergeAsyncState::Merged]);
+
+        let state = poll_merge(&mock, 1, "uuid", Duration::ZERO, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(state, MergeAsyncState::Merged);
+        assert_eq!(mock.get_poll_calls().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_poll_merge_timeout_returns_last_state() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_poll_responses(vec![MergeAsyncState::Pending; 100]);
+
+        let state = poll_merge(&mock, 1, "uuid", Duration::ZERO, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(state, MergeAsyncState::Pending);
+        assert_eq!(mock.get_poll_calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_poll_merge_failed() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_poll_responses(vec![MergeAsyncState::Failed]);
+
+        let state = poll_merge(&mock, 1, "uuid", Duration::ZERO, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(state, MergeAsyncState::Failed);
+    }
+}
+
+mod unstack_test {
+    use crate::common::fixtures::github_config;
+    use crate::common::mock_platform::{MockPlatformService, make_stack};
+    use jj_ryu::unstack::{UnstackOutcome, find_submitted_stack, unstack};
+
+    #[tokio::test]
+    async fn test_find_submitted_stack_first_match() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_stack_for_pr(2, Some(make_stack(7, &[1, 2, 3])));
+
+        let stack = find_submitted_stack(&mock, &[1, 2, 3]).await.unwrap();
+        assert_eq!(stack.unwrap().number, 7);
+        // Stops at the first hit (PR 2)
+        assert_eq!(mock.get_find_stack_calls(), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn test_find_submitted_stack_none_when_unstacked() {
+        let mock = MockPlatformService::with_config(github_config());
+
+        let stack = find_submitted_stack(&mock, &[1, 2]).await.unwrap();
+        assert!(stack.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unstack_dissolved() {
+        let mock = MockPlatformService::with_config(github_config());
+
+        let outcome = unstack(&mock, 7).await.unwrap();
+        assert_eq!(outcome, UnstackOutcome::Dissolved { stack_number: 7 });
+        assert_eq!(mock.get_unstack_calls(), vec![7]);
+    }
+
+    #[tokio::test]
+    async fn test_unstack_remaining() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_unstack_remaining(make_stack(7, &[1]));
+
+        let outcome = unstack(&mock, 7).await.unwrap();
+        assert_eq!(
+            outcome,
+            UnstackOutcome::Remaining {
+                stack_number: 7,
+                remaining: 1
+            }
+        );
+    }
+}
+
+mod execute_update_base_test {
+    use crate::common::fixtures::{github_config, gitlab_config, make_bookmark};
+    use crate::common::mock_platform::{MockPlatformService, make_stack};
+    use jj_ryu::submit::{PrBaseUpdate, StepOutcome, execute_update_base};
+    use jj_ryu::types::PullRequest;
+
+    fn make_update(pr_number: u64, bookmark: &str) -> PrBaseUpdate {
+        PrBaseUpdate {
+            bookmark: make_bookmark(bookmark),
+            current_base: "main".to_string(),
+            expected_base: "feat-base".to_string(),
+            pr: PullRequest {
+                number: pr_number,
+                html_url: format!("https://github.com/test/repo/pull/{pr_number}"),
+                base_ref: "main".to_string(),
+                head_ref: bookmark.to_string(),
+                title: format!("PR for {bookmark}"),
+                node_id: Some(format!("PR_node_{pr_number}")),
+                is_draft: false,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dissolves_stack_before_updating_base() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_stack_for_pr(1, Some(make_stack(7, &[1, 2])));
+
+        let outcome = execute_update_base(&mock, &make_update(1, "feat-a")).await;
+
+        assert!(matches!(outcome, StepOutcome::Success(_)));
+        assert_eq!(mock.get_unstack_calls(), vec![7]);
+        assert_eq!(mock.get_update_base_calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_no_unstack_when_pr_not_stacked() {
+        let mock = MockPlatformService::with_config(github_config());
+
+        let outcome = execute_update_base(&mock, &make_update(1, "feat-a")).await;
+
+        assert!(matches!(outcome, StepOutcome::Success(_)));
+        assert_eq!(mock.get_unstack_calls().len(), 0);
+        assert_eq!(mock.get_update_base_calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_skips_stack_check_without_native_stacks() {
+        let mock = MockPlatformService::with_config(gitlab_config());
+
+        let outcome = execute_update_base(&mock, &make_update(1, "feat-a")).await;
+
+        assert!(matches!(outcome, StepOutcome::Success(_)));
+        assert_eq!(mock.get_find_stack_calls().len(), 0);
+        assert_eq!(mock.get_unstack_calls().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_stacks_unavailable_proceeds_with_update() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.stacks_unavailable();
+
+        let outcome = execute_update_base(&mock, &make_update(1, "feat-a")).await;
+
+        assert!(matches!(outcome, StepOutcome::Success(_)));
+        assert_eq!(mock.get_update_base_calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_find_stack_error_is_fatal() {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.fail_find_stack("api down");
+
+        let outcome = execute_update_base(&mock, &make_update(1, "feat-a")).await;
+
+        assert!(matches!(outcome, StepOutcome::FatalError(_)));
+        assert_eq!(mock.get_update_base_calls().len(), 0);
     }
 }
 

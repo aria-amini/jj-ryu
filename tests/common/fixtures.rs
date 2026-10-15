@@ -8,7 +8,7 @@
 use chrono::Utc;
 use jj_ryu::types::{
     Bookmark, BookmarkSegment, BranchStack, ChangeGraph, LogEntry, Platform, PlatformConfig,
-    PrComment, PullRequest,
+    PullRequest,
 };
 use std::collections::HashMap;
 
@@ -88,14 +88,6 @@ pub fn make_pr_draft(number: u64, head: &str, base: &str) -> PullRequest {
         title: format!("PR for {head}"),
         node_id: Some(format!("PR_node_{number}")),
         is_draft: true,
-    }
-}
-
-/// Create a PR comment
-pub fn make_pr_comment(id: u64, body: &str) -> PrComment {
-    PrComment {
-        id,
-        body: body.to_string(),
     }
 }
 
