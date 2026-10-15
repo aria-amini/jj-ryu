@@ -26,11 +26,11 @@ Ryu currently supports linear stacks only. If `trunk()..@` contains a merge comm
 ## Install
 
 ```sh
-# npm (prebuilt binaries)
-npm install -g jj-ryu
+# mise (prebuilt binary from GitHub releases)
+mise use -g github:aria-amini/jj-ryu
 
-# cargo
-cargo install jj-ryu
+# cargo (build from source)
+cargo install --locked --git https://github.com/aria-amini/jj-ryu
 ```
 
 Binary name is `ryu`.
