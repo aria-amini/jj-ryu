@@ -4,6 +4,53 @@ use crate::platform::PlatformService;
 use crate::types::{MergeAsyncOutcome, MergeAsyncState, MergeOptions};
 
 #[tokio::test]
+async fn stack_lookup_ignores_closed_stacks() {
+    let mut server = mockito::Server::new_async().await;
+    let mut service =
+        GitHubService::new("test-token", "owner".into(), "repo".into(), None).unwrap();
+    service.api_base = server.url();
+
+    // A closed result can precede the current stack; all-closed and empty
+    // responses should both yield no current membership.
+    for (stacks, expected) in [
+        (vec![(9, false), (7, true), (6, true)], Some(7)),
+        (vec![(9, false), (7, false)], None),
+        (vec![], None),
+    ] {
+        let body: Vec<_> = stacks
+            .into_iter()
+            .map(|(number, open)| {
+                serde_json::json!({
+                    "id": number, "number": number, "url": "stack-url",
+                    "base": {"ref": "main"}, "open": open
+                })
+            })
+            .collect();
+        let request = server
+            .mock("GET", "/repos/owner/repo/stacks")
+            .match_query(mockito::Matcher::UrlEncoded(
+                "pull_request".into(),
+                "2".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(serde_json::to_string(&body).unwrap())
+            .create_async()
+            .await;
+        assert_eq!(
+            service
+                .find_stack_for_pr(2)
+                .await
+                .unwrap()
+                .map(|s| s.number),
+            expected
+        );
+        request.assert_async().await;
+    }
+    drop(server);
+}
+
+#[tokio::test]
 async fn accepted_merge_reads_nested_uuid_and_polls_result() {
     let mut server = mockito::Server::new_async().await;
     let request = server

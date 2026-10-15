@@ -57,8 +57,7 @@ impl GitHubService {
         match response.status() {
             StatusCode::OK => {
                 let stacks: Vec<PrStack> = response.json().await?;
-                // Ordered newest-first; the first is the current stack
-                Ok(stacks.into_iter().next())
+                Ok(stacks.into_iter().find(|stack| stack.open))
             }
             StatusCode::NOT_FOUND | StatusCode::FORBIDDEN => Err(Error::StacksUnavailable(
                 "stacks endpoint not available for this repository".to_string(),

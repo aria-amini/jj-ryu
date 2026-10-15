@@ -9,6 +9,9 @@ use jj_ryu::repo::{JjWorkspace, select_remote};
 use jj_ryu::tracking::{load_pr_cache, load_tracking};
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
+
+const STACK_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Native stack membership info, keyed by branch name
 struct StackAnnotation {
@@ -97,7 +100,13 @@ pub async fn run_analyze(path: &Path) -> Result<()> {
                 .find_map(|b| pr_cache.get(&b.name))
                 .map(|p| p.number);
             match bottom_pr {
-                Some(pr_number) => native_stack_annotation(config, pr_number).await,
+                Some(pr_number) => tokio::time::timeout(
+                    STACK_LOOKUP_TIMEOUT,
+                    native_stack_annotation(config, pr_number),
+                )
+                .await
+                .ok()
+                .flatten(),
                 None => None,
             }
         }

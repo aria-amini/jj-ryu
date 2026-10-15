@@ -8,8 +8,9 @@ use indicatif::ProgressBar;
 use jj_ryu::error::{Error, Result};
 use jj_ryu::merge::{MergePlan, plan_merge, poll_merge};
 use jj_ryu::platform::PlatformService;
-use jj_ryu::tracking::{PrCache, load_pr_cache, save_pr_cache};
+use jj_ryu::tracking::{PrCache, load_pr_cache};
 use jj_ryu::types::{MergeAsyncOutcome, MergeAsyncState, MergeMethod, MergeOptions, PrStack};
+use jj_ryu::unstack::find_submitted_stack;
 use std::path::Path;
 use std::time::Duration;
 
@@ -34,7 +35,7 @@ pub async fn run_merge(
         });
     }
 
-    let mut pr_cache = load_pr_cache(&ctx.workspace_root).unwrap_or_default();
+    let pr_cache = load_pr_cache(&ctx.workspace_root).unwrap_or_default();
 
     // Resolve the target PR: explicit bookmark, or bottom unmerged stack layer
     let lookup_pr = match bookmark {
@@ -134,12 +135,6 @@ pub async fn run_merge(
         }
     }
 
-    // Bookkeep merged layers locally
-    for layer in &plan.layers {
-        pr_cache.remove(&layer.head.ref_field);
-    }
-    save_pr_cache(&ctx.workspace_root, &pr_cache)?;
-
     println!(
         "{} Merged {} PR(s) from stack #{}",
         check(),
@@ -180,7 +175,14 @@ async fn bottom_unmerged_pr(platform: &dyn PlatformService, pr_cache: &PrCache) 
             "no submitted PRs found; run `ryu submit` first".to_string(),
         ));
     }
-    let stack = find_stack(platform, *pr_numbers.first().unwrap()).await?;
+    let stack = find_submitted_stack(platform, &pr_numbers)
+        .await?
+        .ok_or_else(|| {
+            Error::InvalidArgument(
+                "no submitted PR belongs to a native stack; merge it with `gh pr merge`"
+                    .to_string(),
+            )
+        })?;
     stack
         .pull_requests
         .iter()

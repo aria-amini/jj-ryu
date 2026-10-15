@@ -71,17 +71,22 @@ pub fn apply_merged_layers(
             // A rebase or merge-commit merge lands copies of every commit
             // below the tip, not only of the tip. A chained PR can also merge
             // into an open base branch instead of trunk, so keep every commit
-            // that an open bookmark outside this layer's descendants needs.
+            // that a remaining bookmark at or outside this layer's tip needs.
+            // Descendant layers can be rebased after dropping landed ancestors.
             let open: Vec<String> = workspace
                 .local_bookmarks()?
                 .into_iter()
                 .filter(|b| !merged_names.contains(b.name.as_str()))
                 .map(|b| b.commit_id)
                 .collect();
-            let mut landed_revset = format!("::{tip} ~ ::trunk()");
-            if !open.is_empty() {
-                landed_revset.push_str(&format!(" ~ ::(({}) ~ {tip}::)", open.join(" | ")));
-            }
+            let landed_revset = if open.is_empty() {
+                format!("::{tip} ~ ::trunk()")
+            } else {
+                format!(
+                    "::{tip} ~ ::trunk() ~ ::(({}) ~ ({tip}:: ~ {tip}))",
+                    open.join(" | ")
+                )
+            };
             let landed: Vec<String> = workspace
                 .resolve_revset(&landed_revset)?
                 .into_iter()

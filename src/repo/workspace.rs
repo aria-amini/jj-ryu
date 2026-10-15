@@ -203,6 +203,9 @@ impl JjWorkspace {
     ///
     /// Without the snapshot, a later rewrite of the working-copy commit
     /// orphans the unsnapshotted edits in a divergent commit.
+    ///
+    /// Requires Jujutsu CLI 0.40.0 or later on PATH for `jj util snapshot`,
+    /// including callers that only analyze or read the workspace.
     pub fn open(path: &Path) -> Result<Self> {
         let settings = create_user_settings()?;
         let workspace_root = find_workspace_dir(path);
