@@ -43,8 +43,10 @@ jobs:
 
       - name: Validate version
         id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          VERSION="${{ inputs.version }}"
+          VERSION="$INPUT_VERSION"
           VERSION="${VERSION#v}"
           if ! npx --yes semver "$VERSION" > /dev/null 2>&1; then
             echo "::error::Invalid semver: $VERSION"
