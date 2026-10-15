@@ -1,0 +1,6 @@
+# Loaded only with MISE_ENV=ci. Locally, a project pin would shadow the
+# developer's own jj and gh builds; the tests need jj >= 0.40 and gh.
+
+[tools]
+gh = "2.102.0"
+jj = "0.46.0"

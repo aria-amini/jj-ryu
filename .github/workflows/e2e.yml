@@ -1,0 +1,74 @@
+name: E2E
+
+# The tests push branches and squash-merge PRs into the test repository's main.
+# They refuse a repository without a .jj-ryu-e2e file at its root. Also scope
+# TEST_GITHUB_TOKEN as a fine-grained token to that one repository.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Parallel runs against one repository interfere with each other's PRs.
+concurrency:
+  group: e2e
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  MISE_ENV: ci
+  E2E_REPOSITORY: ${{ vars.E2E_REPOSITORY }}
+  JJ_USER: jj-ryu e2e
+  JJ_EMAIL: e2e@jj-ryu.invalid
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Install mise tools
+        uses: jdx/mise-action@v5
+        with:
+          version: 2026.10.10
+
+      - name: Check test repository access
+        env:
+          GH_TOKEN: ${{ secrets.TEST_GITHUB_TOKEN }}
+        run: |
+          test -n "$E2E_REPOSITORY" || { echo "::error::Set the E2E_REPOSITORY repository variable to the owner/name of a disposable test repository"; exit 1; }
+          if [[ "${E2E_REPOSITORY,,}" == "${GITHUB_REPOSITORY,,}" ]]; then
+            echo "::error::E2E_REPOSITORY must not be $GITHUB_REPOSITORY: the tests merge PRs into its main"
+            exit 1
+          fi
+          test -n "$GH_TOKEN" || { echo "::error::TEST_GITHUB_TOKEN secret is not set"; exit 1; }
+          gh repo view "$E2E_REPOSITORY" --json nameWithOwner --jq .nameWithOwner
+
+      # `ryu submit` pushes through plain git, which has no credentials otherwise.
+      # The helper reads GH_TOKEN at push time, so the token is not stored on disk.
+      - name: Configure git credentials
+        env:
+          GH_TOKEN: ${{ secrets.TEST_GITHUB_TOKEN }}
+        run: gh auth setup-git
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Build scripts and proc macros run here, so this step gets no token.
+      - name: Build E2E tests
+        run: cargo test --test e2e_tests --no-run
+
+      - name: Run E2E tests
+        env:
+          GH_TOKEN: ${{ secrets.TEST_GITHUB_TOKEN }}
+        run: |
+          export JJ_RYU_E2E_OWNER="${E2E_REPOSITORY%%/*}"
+          export JJ_RYU_E2E_REPO="${E2E_REPOSITORY#*/}"
+          mise run e2e

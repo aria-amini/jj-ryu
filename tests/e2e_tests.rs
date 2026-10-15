@@ -1,32 +1,57 @@
 //! End-to-end tests with real GitHub API
 //!
-//! These tests require:
+//! The tests push branches and squash-merge PRs into the test repository's
+//! main. They require:
 //! - `JJ_RYU_E2E_TESTS=1` environment variable
-//! - `gh` CLI authenticated with repo scope
+//! - `JJ_RYU_E2E_OWNER` and `JJ_RYU_E2E_REPO`: a disposable repository that
+//!   allows squash merges and contains a `.jj-ryu-e2e` file at its root
+//! - `gh` CLI authenticated with repo scope (or `GH_TOKEN`)
 //! - `jj` CLI installed
-//! - Test repo: `dmmulroy/jj-ryu-test`
 //!
-//! Run with: `JJ_RYU_E2E_TESTS=1 cargo test --test e2e_tests -- --include-ignored`
+//! CI runs these tests only from the manual `E2E` workflow.
+//!
+//! Run with: `mise run e2e`
 
 use jj_ryu::platform::{GitHubService, PlatformService};
 use jj_ryu::types::Platform;
 use std::env;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::Once;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-const TEST_OWNER: &str = "dmmulroy";
-const TEST_REPO: &str = "jj-ryu-test";
+/// A repository without this file at the root of `main`, the branch the tests
+/// write to, is refused before any write.
+/// Real repositories never contain it, so a wrong owner or name cannot reach
+/// them, whatever token runs the tests.
+const E2E_MARKER: &str = ".jj-ryu-e2e";
 
-/// Test repo owner (override with `JJ_RYU_E2E_OWNER`)
 fn test_owner() -> String {
-    env::var("JJ_RYU_E2E_OWNER").unwrap_or_else(|_| TEST_OWNER.to_string())
+    env::var("JJ_RYU_E2E_OWNER").expect("JJ_RYU_E2E_OWNER must name the test repository owner")
 }
 
-/// Test repo name (override with `JJ_RYU_E2E_REPO`)
 fn test_repo() -> String {
-    env::var("JJ_RYU_E2E_REPO").unwrap_or_else(|_| TEST_REPO.to_string())
+    env::var("JJ_RYU_E2E_REPO").expect("JJ_RYU_E2E_REPO must name the test repository")
+}
+
+fn assert_disposable_repo() {
+    static CHECKED: Once = Once::new();
+    CHECKED.call_once(|| {
+        let marker = Command::new("gh")
+            .args([
+                "api",
+                &format!("repos/{}/contents/{E2E_MARKER}?ref=main", repo_spec()),
+                "--silent",
+            ])
+            .output()
+            .expect("failed to run gh");
+        assert!(
+            marker.status.success(),
+            "{} has no {E2E_MARKER} file on main; refusing to push or merge there",
+            repo_spec()
+        );
+    });
 }
 
 /// Check if E2E tests should run
@@ -71,13 +96,17 @@ struct TestContext {
 }
 
 impl TestContext {
+    /// Returns `None` only when E2E is disabled. With E2E enabled, a setup
+    /// failure panics so that a broken environment cannot pass as a skip.
     fn new() -> Option<Self> {
         if !e2e_enabled() {
             return None;
         }
+        assert_disposable_repo();
 
-        let token = get_gh_token()?;
-        let service = GitHubService::new(&token, test_owner(), test_repo(), None).ok()?;
+        let token = get_gh_token().expect("gh auth token failed");
+        let service = GitHubService::new(&token, test_owner(), test_repo(), None)
+            .expect("GitHubService::new failed");
 
         Some(Self {
             service,
@@ -194,40 +223,41 @@ struct E2ERepo {
 }
 
 impl E2ERepo {
-    /// Clone test repo and init jj
+    /// Clone test repo and init jj. Returns `None` only when E2E is disabled.
+    /// With E2E enabled, a setup failure panics so that a broken environment
+    /// cannot pass as a skip.
     fn new() -> Option<Self> {
         if !e2e_enabled() {
             return None;
         }
+        assert_disposable_repo();
 
-        let dir = TempDir::new().ok()?;
+        let dir = TempDir::new().expect("failed to create temp dir");
         let prefix = unique_prefix();
 
-        // Clone via gh CLI (handles auth automatically)
         let clone = Command::new("gh")
-            .args(["repo", "clone", &repo_spec(), dir.path().to_str()?])
+            .arg("repo")
+            .arg("clone")
+            .arg(repo_spec())
+            .arg(dir.path())
             .output()
-            .ok()?;
+            .expect("failed to run gh");
+        assert!(
+            clone.status.success(),
+            "gh repo clone failed: {}",
+            String::from_utf8_lossy(&clone.stderr)
+        );
 
-        if !clone.status.success() {
-            eprintln!("Clone failed: {}", String::from_utf8_lossy(&clone.stderr));
-            return None;
-        }
-
-        // Init jj colocated
         let jj_init = Command::new("jj")
             .args(["git", "init", "--colocate"])
             .current_dir(dir.path())
             .output()
-            .ok()?;
-
-        if !jj_init.status.success() {
-            eprintln!(
-                "jj init failed: {}",
-                String::from_utf8_lossy(&jj_init.stderr)
-            );
-            return None;
-        }
+            .expect("failed to run jj");
+        assert!(
+            jj_init.status.success(),
+            "jj git init failed: {}",
+            String::from_utf8_lossy(&jj_init.stderr)
+        );
 
         Some(Self {
             dir,
@@ -579,8 +609,8 @@ async fn test_github_service_config() {
 
     let config = ctx.service.config();
     assert_eq!(config.platform, Platform::GitHub);
-    assert_eq!(config.owner, TEST_OWNER);
-    assert_eq!(config.repo, TEST_REPO);
+    assert_eq!(config.owner, test_owner());
+    assert_eq!(config.repo, test_repo());
 }
 
 #[tokio::test]
