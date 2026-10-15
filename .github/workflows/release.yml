@@ -81,6 +81,11 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+
       - name: Update Cargo.toml version
         run: |
           sed -i 's/^version = ".*"/version = "${{ needs.validate.outputs.version }}"/' Cargo.toml
