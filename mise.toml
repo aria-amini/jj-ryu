@@ -21,8 +21,12 @@ run = "scripts/test-release-archives.sh"
 description = "Lint GitHub workflows (uses shellcheck for run: scripts)"
 run = "actionlint"
 
+[tasks.shellcheck]
+description = "Lint shell scripts"
+run = "shellcheck scripts/*.sh"
+
 [tasks.lint]
-depends = ["fmt", "clippy", "archives", "actionlint"]
+depends = ["fmt", "clippy", "shellcheck", "archives", "actionlint"]
 
 [tasks.test]
 run = "cargo test"
