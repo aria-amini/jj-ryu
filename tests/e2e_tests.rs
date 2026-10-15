@@ -13,7 +13,7 @@
 //! Run with: `mise run e2e`
 
 use jj_ryu::platform::{GitHubService, PlatformService};
-use jj_ryu::types::Platform;
+use jj_ryu::types::{MergeOptions, Platform};
 use std::env;
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -298,20 +298,29 @@ impl E2ERepo {
         squash.is_ok_and(|o| o.status.success())
     }
 
-    /// Create a bookmark at current commit
-    fn create_bookmark(&mut self, name: &str) -> bool {
+    /// Create a bookmark at the current commit and track it for `ryu submit`.
+    /// Returns the full bookmark name.
+    fn create_bookmark(&mut self, name: &str) -> String {
         let full_name = format!("{}-{name}", self.prefix);
         let output = Command::new("jj")
             .args(["bookmark", "create", &full_name])
             .current_dir(self.path())
-            .output();
+            .output()
+            .expect("failed to run jj");
+        assert!(
+            output.status.success(),
+            "jj bookmark create {full_name} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        self.created_bookmarks.push(full_name.clone());
 
-        if output.is_ok_and(|o| o.status.success()) {
-            self.created_bookmarks.push(full_name);
-            true
-        } else {
-            false
-        }
+        let track = self.run_ryu(&["track", &full_name]);
+        assert!(
+            track.status.success(),
+            "ryu track {full_name} failed: {}",
+            String::from_utf8_lossy(&track.stderr)
+        );
+        full_name
     }
 
     /// Build a stack of commits with bookmarks
@@ -323,11 +332,7 @@ impl E2ERepo {
                 self.create_commit(message),
                 "Failed to create commit: {message}"
             );
-            assert!(
-                self.create_bookmark(bookmark),
-                "Failed to create bookmark: {bookmark}"
-            );
-            bookmarks.push(format!("{}-{bookmark}", self.prefix));
+            bookmarks.push(self.create_bookmark(bookmark));
         }
         bookmarks
     }
@@ -348,6 +353,21 @@ impl E2ERepo {
             .current_dir(self.path())
             .output()
             .expect("Failed to run ryu")
+    }
+
+    /// Start a new working-copy commit on `rev`. `ryu submit` sees only
+    /// `trunk()..@`, so the stack to submit must be below the working copy.
+    fn new_on(&self, rev: &str) {
+        let output = Command::new("jj")
+            .args(["new", rev])
+            .current_dir(self.path())
+            .output()
+            .expect("failed to run jj");
+        assert!(
+            output.status.success(),
+            "jj new {rev} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     /// Run ryu submit
@@ -454,20 +474,20 @@ fn get_pr_base(pr_number: u64) -> Option<String> {
     )
 }
 
-fn merge_pr(pr_number: u64) -> bool {
-    let output = Command::new("gh")
-        .args([
-            "pr",
-            "merge",
-            &pr_number.to_string(),
-            "-R",
-            &repo_spec(),
-            "--squash",
-            "--delete-branch",
-        ])
-        .output();
-
-    output.is_ok_and(|o| o.status.success())
+/// Squash-merge a PR. `ryu submit` registers native GitHub stacks, and GitHub
+/// rejects the synchronous merge (`gh pr merge`) for stacked PRs, so this uses
+/// the asynchronous endpoint that `ryu merge` uses. Callers wait with
+/// `wait_for_pr_merged`.
+async fn merge_pr(pr_number: u64) {
+    let token = get_gh_token().expect("gh auth token failed");
+    let service = GitHubService::new(&token, test_owner(), test_repo(), None)
+        .expect("GitHubService::new failed");
+    if let Err(e) = service
+        .merge_pr_async(pr_number, &MergeOptions::default())
+        .await
+    {
+        panic!("merge of PR #{pr_number} failed: {e}");
+    }
 }
 
 /// Get PR state (OPEN, MERGED, CLOSED)
@@ -939,7 +959,7 @@ async fn test_sync_after_merge() {
     assert_eq!(get_pr_base(pr_b), Some(bookmarks[0].clone()));
 
     // Merge PR A
-    assert!(merge_pr(pr_a), "Failed to merge PR A");
+    merge_pr(pr_a).await;
 
     // Wait for merge to complete
     assert!(
@@ -986,11 +1006,21 @@ async fn test_sync_multiple_stacks_updates_bases() {
     let stack2 = repo.build_stack(&[("multi-x", "Stack 2 X"), ("multi-y", "Stack 2 Y")]);
 
     // Submit both stacks
+    repo.new_on(&stack1[1]);
     let output1 = repo.submit(&stack1[1]);
-    assert!(output1.status.success(), "submit stack1 failed");
+    assert!(
+        output1.status.success(),
+        "submit stack1 failed: {}",
+        String::from_utf8_lossy(&output1.stderr)
+    );
 
+    repo.new_on(&stack2[1]);
     let output2 = repo.submit(&stack2[1]);
-    assert!(output2.status.success(), "submit stack2 failed");
+    assert!(
+        output2.status.success(),
+        "submit stack2 failed: {}",
+        String::from_utf8_lossy(&output2.stderr)
+    );
 
     // Get PR numbers
     let pr_a = find_pr_number(&stack1[0]).expect("PR A");
@@ -1011,8 +1041,8 @@ async fn test_sync_multiple_stacks_updates_bases() {
     );
 
     // Merge both root PRs
-    assert!(merge_pr(pr_a), "Failed to merge PR A");
-    assert!(merge_pr(pr_x), "Failed to merge PR X");
+    merge_pr(pr_a).await;
+    merge_pr(pr_x).await;
 
     // Wait for merges to complete
     assert!(
@@ -1142,7 +1172,8 @@ async fn test_stack_swap_reorder() {
     // 1. Retargeting B's PR from A to main (before pushing A's new history)
     // 2. Retargeting A's PR from main to B
     // 3. Pushing both branches
-    let output = repo.submit(&bookmarks[0]); // A is now the leaf
+    repo.new_on(&bookmarks[0]); // A is now the leaf
+    let output = repo.submit(&bookmarks[0]);
     assert!(
         output.status.success(),
         "submit after swap failed: {}",
@@ -1201,12 +1232,7 @@ async fn test_mixed_operations_ordering() {
         .output();
 
     repo.create_commit("Mixed C");
-    let c_bookmark = format!("{}-mixed-c", repo.prefix);
-    let _ = Command::new("jj")
-        .args(["bookmark", "create", &c_bookmark])
-        .current_dir(repo.path())
-        .output();
-    repo.created_bookmarks.push(c_bookmark.clone());
+    let c_bookmark = repo.create_bookmark("mixed-c");
 
     let output = repo.submit(&c_bookmark);
     assert!(
@@ -1240,12 +1266,7 @@ async fn test_insert_middle_of_stack() {
 
     // Create C on top of A
     repo.create_commit("Insert C");
-    let c_bookmark = format!("{}-insert-c", repo.prefix);
-    let _ = Command::new("jj")
-        .args(["bookmark", "create", &c_bookmark])
-        .current_dir(repo.path())
-        .output();
-    repo.created_bookmarks.push(c_bookmark.clone());
+    let c_bookmark = repo.create_bookmark("insert-c");
 
     // Submit A -> C
     let output = repo.submit(&c_bookmark);
@@ -1271,12 +1292,7 @@ async fn test_insert_middle_of_stack() {
         .output();
 
     repo.create_commit("Insert B");
-    let b_bookmark = format!("{}-insert-b", repo.prefix);
-    let _ = Command::new("jj")
-        .args(["bookmark", "create", &b_bookmark])
-        .current_dir(repo.path())
-        .output();
-    repo.created_bookmarks.push(b_bookmark.clone());
+    let b_bookmark = repo.create_bookmark("insert-b");
 
     // Rebase C onto B (so stack becomes A -> B -> C)
     let rebase = Command::new("jj")
@@ -1292,6 +1308,7 @@ async fn test_insert_middle_of_stack() {
     );
 
     // Re-submit from C
+    repo.new_on(&c_bookmark);
     let output = repo.submit(&c_bookmark);
     assert!(
         output.status.success(),
