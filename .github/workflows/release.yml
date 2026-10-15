@@ -7,11 +7,6 @@ on:
         description: "Version to release (e.g., 0.1.0, 0.2.0-beta.1)"
         required: true
         type: string
-      npm-only:
-        description: "Publish npm packages from an existing GitHub release"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: write
@@ -57,12 +52,7 @@ jobs:
       - name: Check release tag state
         run: |
           TAG="v${{ steps.version.outputs.version }}"
-          if [[ "${{ inputs['npm-only'] }}" == "true" ]]; then
-            if ! git rev-parse "$TAG" >/dev/null 2>&1; then
-              echo "::error::npm-only publishing requires existing tag $TAG"
-              exit 1
-            fi
-          elif git rev-parse "$TAG" >/dev/null 2>&1; then
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
             echo "::error::Tag $TAG already exists"
             exit 1
           fi
@@ -76,7 +66,6 @@ jobs:
 
   test:
     needs: validate
-    if: ${{ inputs['npm-only'] == false }}
     uses: ./.github/workflows/test.yml
 
   prepare:
@@ -91,11 +80,6 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
       - name: Update Cargo.toml version
         run: |
           sed -i 's/^version = ".*"/version = "${{ needs.validate.outputs.version }}"/' Cargo.toml
@@ -103,14 +87,11 @@ jobs:
       - name: Update Cargo.lock
         run: cargo check --quiet
 
-      - name: Update npm package versions
-        run: node npm/scripts/update-versions.mjs ${{ needs.validate.outputs.version }}
-
       - name: Commit and tag
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml Cargo.lock npm/
+          git add Cargo.toml Cargo.lock
           git commit -m "release: v${{ needs.validate.outputs.version }}"
           git tag "v${{ needs.validate.outputs.version }}"
           git push origin main
@@ -233,175 +214,3 @@ jobs:
           files: release/*
           generate_release_notes: true
 
-  publish-npm:
-    needs: [validate, prepare, build]
-    if: ${{ always() && github.repository_owner == 'dmmulroy' && needs.validate.result == 'success' && (inputs['npm-only'] || (needs.prepare.result == 'success' && needs.build.result == 'success')) }}
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: v${{ needs.validate.outputs.version }}
-
-      - name: Setup Node.js for npm trusted publishing
-        uses: actions/setup-node@v6
-        with:
-          node-version: "24"
-          registry-url: "https://registry.npmjs.org"
-          package-manager-cache: false
-
-      - name: Install npm with trusted publishing support
-        run: npm install --global npm@^11.15.0
-
-      - name: Download build artifacts
-        if: ${{ inputs['npm-only'] == false }}
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Download existing GitHub release archives
-        if: ${{ inputs['npm-only'] }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir -p release
-          gh release download "v${{ needs.validate.outputs.version }}" \
-            --pattern 'ryu-*.tar.gz' \
-            --pattern 'ryu-*.zip' \
-            --dir release
-
-      - name: Extract existing GitHub release artifacts
-        if: ${{ inputs['npm-only'] }}
-        run: |
-          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64 linux-arm64-musl linux-x64-musl; do
-            mkdir -p "artifacts/$platform"
-            tar -xzf "release/ryu-$platform.tar.gz" -C "artifacts/$platform"
-          done
-          for platform in win32-arm64 win32-x64; do
-            mkdir -p "artifacts/$platform"
-            unzip -q "release/ryu-$platform.zip" -d "artifacts/$platform"
-          done
-
-      - name: Prepare platform packages
-        run: |
-          VERSION=${{ needs.validate.outputs.version }}
-          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64 linux-arm64-musl linux-x64-musl win32-arm64 win32-x64; do
-            mkdir -p npm/$platform
-            if [[ "$platform" == win32-* ]]; then
-              cp artifacts/$platform/ryu.exe npm/$platform/
-            else
-              cp artifacts/$platform/ryu npm/$platform/
-              chmod +x npm/$platform/ryu
-            fi
-            node npm/scripts/generate-platform-package.mjs "$platform" "$VERSION"
-          done
-
-      - name: Publish platform packages with npm trusted publishing
-        run: |
-          VERSION=${{ needs.validate.outputs.version }}
-          # Skip win32 packages for now (npm spam detection issue)
-          for platform in darwin-arm64 darwin-x64 linux-arm64 linux-x64 linux-arm64-musl linux-x64-musl; do
-            echo "Publishing jj-ryu-$platform..."
-            npm publish "./npm/$platform" --access public --tag latest || {
-              if npm view "jj-ryu-$platform@$VERSION" > /dev/null 2>&1; then
-                echo "Version already published, skipping"
-              else
-                exit 1
-              fi
-            }
-          done
-
-      - name: Publish main package with npm trusted publishing
-        run: |
-          VERSION=${{ needs.validate.outputs.version }}
-          echo "Publishing jj-ryu..."
-          npm publish ./npm/jj-ryu --access public --tag latest || {
-            if npm view "jj-ryu@$VERSION" > /dev/null 2>&1; then
-              echo "Version already published, skipping"
-            else
-              exit 1
-            fi
-          }
-
-  publish-crates:
-    needs: [prepare, build]
-    runs-on: ubuntu-latest
-    if: github.repository_owner == 'dmmulroy'
-
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: v${{ needs.prepare.outputs.version }}
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          set +e
-          OUTPUT=$(cargo publish 2>&1)
-          EXIT_CODE=$?
-          set -e
-          if [ $EXIT_CODE -eq 0 ]; then
-            echo "Published successfully"
-          elif echo "$OUTPUT" | grep -q "already exists"; then
-            echo "Version already published, skipping"
-          else
-            echo "$OUTPUT"
-            exit $EXIT_CODE
-          fi
-
-  homebrew:
-    needs: [prepare, release]
-    runs-on: ubuntu-latest
-    if: github.repository_owner == 'dmmulroy'
-
-    steps:
-      - name: Get tarball SHA256
-        id: sha
-        run: |
-          TAG_URL="https://github.com/dmmulroy/jj-ryu/archive/refs/tags/v${{ needs.prepare.outputs.version }}.tar.gz"
-          sha=$(curl -sL "$TAG_URL" | shasum -a 256 | cut -d' ' -f1)
-          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout homebrew-tap
-        uses: actions/checkout@v4
-        with:
-          repository: dmmulroy/homebrew-tap
-          token: ${{ secrets.TAP_GITHUB_TOKEN }}
-
-      - name: Update formula
-        run: |
-          sed -i 's|url ".*"|url "https://github.com/dmmulroy/jj-ryu/archive/refs/tags/v${{ needs.prepare.outputs.version }}.tar.gz"|' Formula/jj-ryu.rb
-          sed -i 's|sha256 ".*"|sha256 "${{ steps.sha.outputs.sha256 }}"|' Formula/jj-ryu.rb
-
-      - name: Create PR
-        uses: peter-evans/create-pull-request@v7
-        with:
-          token: ${{ secrets.TAP_GITHUB_TOKEN }}
-          commit-message: "Update jj-ryu to v${{ needs.prepare.outputs.version }}"
-          title: "Update jj-ryu to v${{ needs.prepare.outputs.version }}"
-          body: "Automated update from [jj-ryu release](https://github.com/dmmulroy/jj-ryu/releases/tag/v${{ needs.prepare.outputs.version }})"
-          branch: update-jj-ryu-${{ needs.prepare.outputs.version }}
-          base: main
-
-  summary:
-    needs: [validate, prepare, release, publish-npm, publish-crates, homebrew]
-    runs-on: ubuntu-latest
-    if: always()
-
-    steps:
-      - name: Summary
-        run: |
-          {
-            echo "## Release v${{ needs.validate.outputs.version }}"
-            echo ""
-            echo "| Component | Status |"
-            echo "|-----------|--------|"
-            echo "| GitHub Release | ${{ needs.release.result }} |"
-            echo "| npm | ${{ needs.publish-npm.result }} |"
-            echo "| crates.io | ${{ needs.publish-crates.result }} |"
-            echo "| Homebrew | ${{ needs.homebrew.result }} |"
-          } >> "$GITHUB_STEP_SUMMARY"
