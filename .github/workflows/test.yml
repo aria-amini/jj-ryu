@@ -6,56 +6,28 @@ on:
   pull_request:
   workflow_call:
 
+# A workflow_call caller (release.yml) otherwise passes down its write token.
+permissions:
+  contents: read
+
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
 
 jobs:
   test:
-    name: Test Suite
+    name: Checks (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            lint: true
+          - os: macos-latest
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install jj
-        run: cargo install --locked jj-cli
-
-      - name: Run unit tests
-        run: cargo test --lib
-
-      - name: Run integration tests
-        run: cargo test --test '*'
-
-      - name: Run doc tests
-        run: cargo test --doc
-
-  release-archives:
-    name: Release Archive Regression Check
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Verify archive formats and Unix executable mode
-        run: scripts/test-release-archives.sh
-
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -66,33 +38,29 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
+        if: matrix.lint
         run: cargo fmt --all -- --check
 
-      - name: Clippy
+      - name: Run Clippy
+        if: matrix.lint
         run: cargo clippy --all-targets -- -D warnings
 
-  build:
-    name: Build Check
-    runs-on: ubuntu-latest
+      - name: Verify release archives
+        if: matrix.lint
+        run: scripts/test-release-archives.sh
 
-    steps:
-      - uses: actions/checkout@v4
+      - name: Install jj
+        run: cargo install --locked jj-cli --version 0.46.0
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --release
+      - name: Run tests
+        run: cargo test
 
   # E2E tests run only on main branch with secrets
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: [test, lint]
+    needs: [test]
 
     steps:
       - uses: actions/checkout@v4
