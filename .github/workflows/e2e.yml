@@ -1,8 +1,8 @@
 name: E2E
 
 # The tests push branches and squash-merge PRs into the test repository's main.
-# Scope TEST_GITHUB_TOKEN as a fine-grained token to that one repository: the
-# token scope, not this workflow, keeps the tests out of real repositories.
+# They refuse a repository without a .jj-ryu-e2e file at its root. Also scope
+# TEST_GITHUB_TOKEN as a fine-grained token to that one repository.
 on:
   workflow_dispatch:
 

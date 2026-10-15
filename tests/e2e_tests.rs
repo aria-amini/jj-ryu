@@ -1,35 +1,57 @@
 //! End-to-end tests with real GitHub API
 //!
-//! These tests require:
+//! The tests push branches and squash-merge PRs into the test repository's
+//! main. They require:
 //! - `JJ_RYU_E2E_TESTS=1` environment variable
+//! - `JJ_RYU_E2E_OWNER` and `JJ_RYU_E2E_REPO`: a disposable repository that
+//!   allows squash merges and contains a `.jj-ryu-e2e` file at its root
 //! - `gh` CLI authenticated with repo scope (or `GH_TOKEN`)
 //! - `jj` CLI installed
-//! - Test repo: `dmmulroy/jj-ryu-test` (override with `JJ_RYU_E2E_OWNER` and
-//!   `JJ_RYU_E2E_REPO`)
 //!
 //! CI runs these tests only from the manual `E2E` workflow.
 //!
-//! Run with: `JJ_RYU_E2E_TESTS=1 cargo test --test e2e_tests -- --include-ignored`
+//! Run with: `mise run e2e`
 
 use jj_ryu::platform::{GitHubService, PlatformService};
 use jj_ryu::types::Platform;
 use std::env;
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::sync::Once;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-const TEST_OWNER: &str = "dmmulroy";
-const TEST_REPO: &str = "jj-ryu-test";
+/// A repository without this file at the root of `main`, the branch the tests
+/// write to, is refused before any write.
+/// Real repositories never contain it, so a wrong owner or name cannot reach
+/// them, whatever token runs the tests.
+const E2E_MARKER: &str = ".jj-ryu-e2e";
 
-/// Test repo owner (override with `JJ_RYU_E2E_OWNER`)
 fn test_owner() -> String {
-    env::var("JJ_RYU_E2E_OWNER").unwrap_or_else(|_| TEST_OWNER.to_string())
+    env::var("JJ_RYU_E2E_OWNER").expect("JJ_RYU_E2E_OWNER must name the test repository owner")
 }
 
-/// Test repo name (override with `JJ_RYU_E2E_REPO`)
 fn test_repo() -> String {
-    env::var("JJ_RYU_E2E_REPO").unwrap_or_else(|_| TEST_REPO.to_string())
+    env::var("JJ_RYU_E2E_REPO").expect("JJ_RYU_E2E_REPO must name the test repository")
+}
+
+fn assert_disposable_repo() {
+    static CHECKED: Once = Once::new();
+    CHECKED.call_once(|| {
+        let marker = Command::new("gh")
+            .args([
+                "api",
+                &format!("repos/{}/contents/{E2E_MARKER}?ref=main", repo_spec()),
+                "--silent",
+            ])
+            .output()
+            .expect("failed to run gh");
+        assert!(
+            marker.status.success(),
+            "{} has no {E2E_MARKER} file on main; refusing to push or merge there",
+            repo_spec()
+        );
+    });
 }
 
 /// Check if E2E tests should run
@@ -80,6 +102,7 @@ impl TestContext {
         if !e2e_enabled() {
             return None;
         }
+        assert_disposable_repo();
 
         let token = get_gh_token().expect("gh auth token failed");
         let service = GitHubService::new(&token, test_owner(), test_repo(), None)
@@ -207,6 +230,7 @@ impl E2ERepo {
         if !e2e_enabled() {
             return None;
         }
+        assert_disposable_repo();
 
         let dir = TempDir::new().expect("failed to create temp dir");
         let prefix = unique_prefix();
