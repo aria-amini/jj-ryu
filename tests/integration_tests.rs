@@ -886,6 +886,51 @@ fn test_sync_keeps_working_copy_on_server_rebased_stack() {
     assert!(build_change_graph(&workspace).unwrap().stack.is_none());
 }
 
+/// Only commits that a selected bookmark pushes may block a submission
+#[test]
+fn test_ensure_no_conflicts_checks_pushed_range() {
+    use jj_ryu::error::Error;
+    use jj_ryu::submit::ensure_no_conflicts;
+
+    let repo = TempJjRepo::new();
+    for (name, content) in [("feat-a", "one"), ("feat-b", "two")] {
+        std::fs::write(repo.path().join("x.txt"), content).expect("write x");
+        repo.run_jj(&["commit", "-m", name]);
+        repo.run_jj(&["bookmark", "create", name, "-r", "@-"]);
+    }
+    std::fs::write(repo.path().join("x.txt"), "three").expect("write x");
+
+    // Rewrite feat-b: the working copy above it conflicts, feat-b does not
+    repo.run_jj(&["edit", "feat-b"]);
+    std::fs::write(repo.path().join("x.txt"), "four").expect("write x");
+    repo.run_jj(&["new", "feat-b"]);
+    repo.run_jj(&[
+        "edit",
+        "description(exact:\"\") & children(feat-b) & conflicts()",
+    ]);
+
+    let workspace = repo.workspace();
+    let graph = build_change_graph(&workspace).expect("build graph");
+    let analysis = analyze_submission(&graph, None).expect("analyze");
+    assert!(workspace.has_conflicts("@").unwrap());
+    ensure_no_conflicts(&workspace, &analysis).expect("conflict above feat-b must not block");
+
+    // Rewrite feat-a: feat-b now conflicts and blocks, feat-a alone does not
+    repo.run_jj(&["edit", "feat-a"]);
+    std::fs::write(repo.path().join("x.txt"), "five").expect("write x");
+    repo.run_jj(&["new", "feat-b"]);
+
+    let workspace = repo.workspace();
+    let graph = build_change_graph(&workspace).expect("build graph");
+    let analysis = analyze_submission(&graph, None).expect("analyze");
+    assert!(matches!(
+        ensure_no_conflicts(&workspace, &analysis),
+        Err(Error::ConflictedCommit(name)) if name == "feat-b"
+    ));
+    let lower = analyze_submission(&graph, Some("feat-a")).expect("analyze");
+    ensure_no_conflicts(&workspace, &lower).expect("feat-a is clean");
+}
+
 /// A rebase merge lands copies of every commit in the layer on trunk. Sync
 /// must abandon all local commits of the layer, not only its tip, or the
 /// older commits come back as duplicates on top of trunk.

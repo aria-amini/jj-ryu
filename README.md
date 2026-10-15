@@ -146,6 +146,8 @@ ryu sync
 This fetches from remote and syncs the current stack. `ryu sync` also drops layers whose PRs have merged (deleting the local bookmark and PR cache entry) and rebases the remaining stack onto the updated trunk.
 When GitHub rebases the rest of a stack server-side, the working copy follows the rebased bookmarks. ryu snapshots the working copy before it runs and updates it after sync, so uncommitted edits stay in place.
 
+`ryu submit` and `ryu sync` refuse to push conflicted commits. Resolve the conflicts with jj, then submit again.
+
 ### Merging (GitHub Stacks)
 
 ```sh

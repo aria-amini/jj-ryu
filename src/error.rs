@@ -45,6 +45,12 @@ pub enum Error {
     #[error("GitLab API error: {0}")]
     GitLabApi(String),
 
+    /// Conflicted commit in a bookmark's history (cannot push)
+    #[error(
+        "bookmark '{0}' has conflicted commits - resolve the conflicts with jj, then submit again"
+    )]
+    ConflictedCommit(String),
+
     /// A merge commit makes the stack non-linear and unsupported.
     #[error(
         "unsupported non-linear stack: merge commit {0} detected between trunk() and @; rebase into a linear stack before using ryu"

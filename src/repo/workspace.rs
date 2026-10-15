@@ -763,6 +763,13 @@ impl JjWorkspace {
         Ok(())
     }
 
+    /// Check whether any commit in the revset has unresolved conflicts
+    pub fn has_conflicts(&self, revset: &str) -> Result<bool> {
+        Ok(!self
+            .resolve_revset(&format!("({revset}) & conflicts()"))?
+            .is_empty())
+    }
+
     /// Check out the current working-copy commit on disk
     ///
     /// Operations that rewrite the working-copy commit leave the on-disk

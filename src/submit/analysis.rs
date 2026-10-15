@@ -3,6 +3,7 @@
 //! Identifies what needs to be submitted for a given target bookmark.
 
 use crate::error::{Error, Result};
+use crate::repo::JjWorkspace;
 use crate::types::{Bookmark, BookmarkSegment, ChangeGraph, NarrowedBookmarkSegment};
 
 /// Result of submission analysis
@@ -70,6 +71,22 @@ pub fn analyze_submission(
         target_bookmark: actual_target,
         segments: narrowed,
     })
+}
+
+/// Reject a submission that would push a conflicted commit
+///
+/// A pushed conflicted commit exposes jj's internal conflict trees
+/// (`.jjconflict-*`) on the forge. jj itself refuses such pushes. Each
+/// selected bookmark pushes `trunk()..bookmark`, so commits above the
+/// selected bookmarks do not block the submission.
+pub fn ensure_no_conflicts(workspace: &JjWorkspace, analysis: &SubmissionAnalysis) -> Result<()> {
+    for segment in &analysis.segments {
+        let name = &segment.bookmark.name;
+        if workspace.has_conflicts(&format!("trunk()..{name:?}"))? {
+            return Err(Error::ConflictedCommit(name.clone()));
+        }
+    }
+    Ok(())
 }
 
 /// Select a single bookmark from a segment using heuristics
