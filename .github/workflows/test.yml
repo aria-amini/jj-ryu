@@ -13,6 +13,7 @@ permissions:
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
+  MISE_ENV: ci
 
 jobs:
   test:
@@ -37,21 +38,15 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Check formatting
-        if: matrix.lint
-        run: cargo fmt --all -- --check
+      - name: Install mise tools
+        uses: jdx/mise-action@v5
+        with:
+          version: 2026.10.10
 
-      - name: Run Clippy
+      - name: Lint
         if: matrix.lint
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Verify release archives
-        if: matrix.lint
-        run: scripts/test-release-archives.sh
-
-      - name: Install jj
-        run: cargo install --locked jj-cli --version 0.46.0
+        run: mise run lint
 
       - name: Run tests
-        run: cargo test
+        run: mise run test
 

@@ -1,0 +1,39 @@
+min_version = "2026.9.1"
+
+# Rust stays with rustup: rust-version in Cargo.toml sets the minimum, and CI
+# builds with the latest stable toolchain. CI-only pins live in mise.ci.toml.
+
+[tools]
+actionlint = "1.7.12"
+shellcheck = "0.11.0"
+
+[tasks.fmt]
+run = "cargo fmt --all -- --check"
+
+[tasks.clippy]
+run = "cargo clippy --all-targets -- -D warnings"
+
+[tasks.archives]
+description = "Verify release archive formats and Unix executable mode"
+run = "scripts/test-release-archives.sh"
+
+[tasks.actionlint]
+description = "Lint GitHub workflows (uses shellcheck for run: scripts)"
+run = "actionlint"
+
+[tasks.lint]
+depends = ["fmt", "clippy", "archives", "actionlint"]
+
+[tasks.test]
+run = "cargo test"
+
+[tasks.check]
+description = "Run the PR CI checks except MSRV"
+depends = ["lint", "test"]
+
+[tasks.e2e]
+description = "Run E2E tests against JJ_RYU_E2E_OWNER/JJ_RYU_E2E_REPO"
+env = { JJ_RYU_E2E_TESTS = "1" }
+# Serial: some tests merge into the test repository's main, which moves the
+# base for every other test.
+run = "cargo test --test e2e_tests -- --ignored --test-threads=1"

@@ -19,6 +19,7 @@ concurrency:
 env:
   CARGO_INCREMENTAL: 0
   CARGO_TERM_COLOR: always
+  MISE_ENV: ci
 
 jobs:
   e2e:
@@ -26,6 +27,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install mise tools
+        uses: jdx/mise-action@v5
+        with:
+          version: 2026.10.10
 
       - name: Check test repository access
         env:
@@ -48,15 +54,11 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Install jj
-        run: cargo install --locked jj-cli --version 0.46.0
-
       - name: Run E2E tests
         env:
           GH_TOKEN: ${{ secrets.TEST_GITHUB_TOKEN }}
           E2E_REPOSITORY: ${{ inputs.repository }}
         run: |
-          export JJ_RYU_E2E_TESTS=1
           export JJ_RYU_E2E_OWNER="${E2E_REPOSITORY%%/*}"
           export JJ_RYU_E2E_REPO="${E2E_REPOSITORY#*/}"
-          cargo test --test e2e_tests -- --ignored
+          mise run e2e
