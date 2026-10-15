@@ -26,14 +26,9 @@ jobs:
       version: ${{ steps.version.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
 
       - name: Validate version
         id: version
@@ -42,7 +37,12 @@ jobs:
         run: |
           VERSION="$INPUT_VERSION"
           VERSION="${VERSION#v}"
-          if ! npx --yes semver "$VERSION" > /dev/null 2>&1; then
+          # semver.org grammar. Cargo rejects anything else in Cargo.toml.
+          NUM='(0|[1-9][0-9]*)'
+          PRE='(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)'
+          BUILD='[0-9A-Za-z-]+'
+          SEMVER="^$NUM\\.$NUM\\.$NUM(-$PRE(\\.$PRE)*)?(\\+$BUILD(\\.$BUILD)*)?\$"
+          if [[ ! "$VERSION" =~ $SEMVER ]]; then
             echo "::error::Invalid semver: $VERSION"
             exit 1
           fi
@@ -76,7 +76,7 @@ jobs:
       version: ${{ needs.validate.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -135,7 +135,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: v${{ needs.prepare.outputs.version }}
           persist-credentials: false
@@ -193,7 +193,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: v${{ needs.prepare.outputs.version }}
           persist-credentials: false
