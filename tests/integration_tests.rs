@@ -10,6 +10,59 @@ use jj_ryu::graph::build_change_graph;
 use jj_ryu::submit::{ExecutionStep, analyze_submission, create_submission_plan};
 use predicates::prelude::*;
 
+#[derive(Default)]
+struct MessageProgress(std::sync::Mutex<Vec<String>>);
+
+#[async_trait::async_trait]
+impl jj_ryu::submit::ProgressCallback for MessageProgress {
+    async fn on_phase(&self, _: jj_ryu::submit::Phase) {}
+    async fn on_bookmark_push(&self, _: &str, _: jj_ryu::submit::PushStatus) {}
+    async fn on_pr_created(&self, _: &str, _: &jj_ryu::types::PullRequest) {}
+    async fn on_pr_updated(&self, _: &str, _: &jj_ryu::types::PullRequest) {}
+    async fn on_error(&self, _: &jj_ryu::error::Error) {}
+    async fn on_message(&self, message: &str) {
+        self.0.lock().unwrap().push(message.to_string());
+    }
+}
+
+#[tokio::test]
+async fn test_dry_run_projects_base_updates_and_stack_recreation() {
+    use common::mock_platform::make_stack;
+    use jj_ryu::submit::execute_submission;
+
+    let repo = TempJjRepo::new();
+    repo.build_stack(&[("feat-a", "Add A"), ("feat-b", "Add B")]);
+    let mut workspace = repo.workspace();
+    let graph = build_change_graph(&workspace).unwrap();
+    let analysis = analyze_submission(&graph, Some("feat-b")).unwrap();
+
+    // Cover both a broken chain and a stack dissolved before retargeting.
+    for existing_stack in [false, true] {
+        let mock = MockPlatformService::with_config(github_config());
+        mock.set_find_pr_response("feat-a", Some(make_pr(1, "feat-a", "main")));
+        mock.set_find_pr_response("feat-b", Some(make_pr(2, "feat-b", "main")));
+        let plan = create_submission_plan(&analysis, &mock, "origin", "main")
+            .await
+            .unwrap();
+        if existing_stack {
+            for number in [1, 2] {
+                mock.set_stack_for_pr(number, Some(make_stack(7, &[1, 2])));
+            }
+        }
+        let progress = MessageProgress::default();
+        execute_submission(&plan, &mut workspace, &mock, &progress, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            progress.0.lock().unwrap().last().map(String::as_str),
+            Some("  → create native stack: #1 → #2")
+        );
+        assert_eq!(plan.existing_prs["feat-b"].base_ref, "main");
+        assert_eq!(mock.get_create_stack_calls(), Vec::<Vec<u64>>::new());
+        assert_eq!(mock.get_unstack_calls(), Vec::<u64>::new());
+    }
+}
+
 // =============================================================================
 // CLI Tests
 // =============================================================================
@@ -760,6 +813,116 @@ fn test_apply_merged_layers_drops_and_rebases() {
         .map(|s| s.bookmarks[0].name.as_str())
         .collect();
     assert_eq!(names, ["feat-b", "feat-c"]);
+}
+
+/// A chained PR can merge into its open base branch instead of trunk.
+/// Dropping the merged layer must keep every commit the open base needs.
+#[test]
+fn test_apply_merged_layers_keeps_open_base_commits() {
+    use jj_ryu::sync_merged::{MergedLayer, apply_merged_layers};
+    use jj_ryu::tracking::{PrCache, TrackedBookmark, TrackingState};
+
+    let repo = TempJjRepo::new();
+    StdCommand::new("jj")
+        .args(["bookmark", "create", "main", "-r", "@-"])
+        .current_dir(repo.path())
+        .output()
+        .expect("create main");
+    repo.build_stack(&[("feat-a", "Add A"), ("feat-b", "Add B")]);
+    let mut workspace = repo.workspace();
+    let feat_a = workspace.get_local_bookmark("feat-a").unwrap().unwrap();
+
+    let mut tracking = TrackingState::default();
+    for name in ["feat-a", "feat-b"] {
+        tracking.track(TrackedBookmark::new(name.to_string(), "change".to_string()));
+    }
+    let mut pr_cache = PrCache::new();
+    pr_cache.upsert("feat-a", &make_pr(1, "feat-a", "main"), "origin");
+    pr_cache.upsert("feat-b", &make_pr(2, "feat-b", "feat-a"), "origin");
+    let merged = vec![MergedLayer {
+        bookmark: "feat-b".to_string(),
+        pr_number: Some(2),
+    }];
+    apply_merged_layers(&mut workspace, &mut tracking, &mut pr_cache, &merged).unwrap();
+
+    let after = workspace.get_local_bookmark("feat-a").unwrap().unwrap();
+    assert_eq!(after.change_id, feat_a.change_id);
+    assert!(
+        !workspace
+            .resolve_revset("feat-a ~ ::trunk()")
+            .unwrap()
+            .is_empty(),
+        "feat-a's commits were abandoned"
+    );
+    assert!(tracking.is_tracked("feat-a"));
+    assert!(!tracking.is_tracked("feat-b"));
+}
+
+/// Cleanup must keep ancestors used by an unmerged alias at the merged tip.
+#[test]
+fn test_apply_merged_layers_keeps_unmerged_alias() {
+    use jj_ryu::sync_merged::{MergedLayer, apply_merged_layers};
+    use jj_ryu::tracking::{PrCache, TrackedBookmark, TrackingState};
+
+    let repo = TempJjRepo::new();
+    repo.build_stack(&[("feat-a", "Add A"), ("feat-b", "Add B")]);
+    repo.run_jj(&["bookmark", "create", "alias", "-r", "feat-b"]);
+    let mut workspace = repo.workspace();
+    let original = workspace.get_local_bookmark("alias").unwrap().unwrap();
+    let mut tracking = TrackingState::default();
+    tracking.track(TrackedBookmark::new(
+        "alias".into(),
+        original.change_id.clone(),
+    ));
+    let mut pr_cache = PrCache::new();
+
+    apply_merged_layers(
+        &mut workspace,
+        &mut tracking,
+        &mut pr_cache,
+        &[MergedLayer {
+            bookmark: "feat-b".into(),
+            pr_number: Some(2),
+        }],
+    )
+    .unwrap();
+
+    let after = workspace.get_local_bookmark("alias").unwrap().unwrap();
+    assert_eq!(after.change_id, original.change_id);
+    assert_eq!(after.commit_id, original.commit_id);
+    assert!(tracking.is_tracked("alias"));
+}
+
+/// Detecting merged layers in tracking order can put the upper layer first.
+#[test]
+fn test_apply_merged_layers_accepts_top_down_order() {
+    use jj_ryu::sync_merged::{MergedLayer, apply_merged_layers};
+    use jj_ryu::tracking::{PrCache, TrackingState};
+
+    let repo = TempJjRepo::new();
+    repo.build_stack(&[
+        ("feat-a", "Add A"),
+        ("feat-b", "Add B"),
+        ("feat-c", "Add C"),
+    ]);
+    let mut workspace = repo.workspace();
+    let original = workspace.get_local_bookmark("feat-c").unwrap().unwrap();
+    let mut tracking = TrackingState::default();
+    let mut pr_cache = PrCache::new();
+    let merged = ["feat-b", "feat-a"].map(|name| MergedLayer {
+        bookmark: name.into(),
+        pr_number: None,
+    });
+    apply_merged_layers(&mut workspace, &mut tracking, &mut pr_cache, &merged).unwrap();
+
+    assert!(workspace.get_local_bookmark("feat-a").unwrap().is_none());
+    assert!(workspace.get_local_bookmark("feat-b").unwrap().is_none());
+    let after = workspace.get_local_bookmark("feat-c").unwrap().unwrap();
+    assert_eq!(after.change_id, original.change_id);
+    let trunk = workspace.resolve_revset("trunk()").unwrap();
+    let remaining = workspace.resolve_revset("trunk()..feat-c").unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].parents, vec![trunk[0].commit_id.clone()]);
 }
 
 /// Fetch and drop one merged layer the way `ryu sync` does

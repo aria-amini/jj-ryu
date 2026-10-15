@@ -35,6 +35,10 @@ cargo install jj-ryu
 
 Binary name is `ryu`.
 
+Jujutsu CLI 0.40.0 or later must be on your PATH. Commands that open a
+workspace, including the read-only stack view (`ryu`), run `jj util snapshot`
+before reading it to preserve uncommitted edits.
+
 ## Quick start
 
 ```sh

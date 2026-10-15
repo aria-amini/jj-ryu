@@ -6,7 +6,7 @@
 
 use crate::error::Error;
 use crate::platform::PlatformService;
-use crate::submit::plan::SubmissionPlan;
+use crate::submit::plan::{ExecutionStep, SubmissionPlan};
 use crate::submit::progress::ProgressCallback;
 use crate::types::PullRequest;
 use std::collections::HashMap;
@@ -71,6 +71,15 @@ pub async fn plan_stack_action(
     platform: &dyn PlatformService,
     prs: &[PullRequest],
 ) -> crate::error::Result<StackAction> {
+    plan_stack_action_with_dissolved(platform, prs, &[]).await
+}
+
+/// Ignore stacks that execution will dissolve before registration.
+async fn plan_stack_action_with_dissolved(
+    platform: &dyn PlatformService,
+    prs: &[PullRequest],
+    dissolved: &[u64],
+) -> crate::error::Result<StackAction> {
     if prs.len() < 2 {
         return Ok(StackAction::Skip {
             reason: "native stacks require at least 2 PRs".to_string(),
@@ -86,6 +95,9 @@ pub async fn plan_stack_action(
     let mut found: Option<crate::types::PrStack> = None;
     for pr in prs {
         if let Some(stack) = platform.find_stack_for_pr(pr.number).await? {
+            if dissolved.contains(&stack.number) {
+                continue;
+            }
             match &found {
                 None => found = Some(stack),
                 Some(existing) if existing.number == stack.number => {}
@@ -193,10 +205,33 @@ pub async fn report_stack_dry_run(
     plan: &SubmissionPlan,
     progress: &dyn ProgressCallback,
 ) {
-    let prs = ordered_prs(plan, &plan.existing_prs);
+    let mut projected_prs = plan.existing_prs.clone();
+    for step in &plan.execution_steps {
+        if let ExecutionStep::UpdateBase(update) = step
+            && let Some(pr) = projected_prs.get_mut(&update.bookmark.name)
+        {
+            pr.base_ref.clone_from(&update.expected_base);
+        }
+    }
+    let prs = ordered_prs(plan, &projected_prs);
 
     if prs.len() == plan.segments.len() && !prs.is_empty() {
-        match plan_stack_action(platform, &prs).await {
+        let action = async {
+            let mut dissolved = Vec::new();
+            if platform.supports_native_stacks() {
+                for step in &plan.execution_steps {
+                    if let ExecutionStep::UpdateBase(update) = step
+                        && projected_prs.contains_key(&update.bookmark.name)
+                        && let Some(stack) = platform.find_stack_for_pr(update.pr.number).await?
+                    {
+                        dissolved.push(stack.number);
+                    }
+                }
+            }
+            plan_stack_action_with_dissolved(platform, &prs, &dissolved).await
+        }
+        .await;
+        match action {
             Ok(action) => {
                 progress
                     .on_message(&format!("  → {}", format_stack_action(&action)))
