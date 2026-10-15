@@ -19,6 +19,8 @@ env:
   CARGO_TERM_COLOR: always
   MISE_ENV: ci
   E2E_REPOSITORY: ${{ vars.E2E_REPOSITORY }}
+  JJ_USER: jj-ryu e2e
+  JJ_EMAIL: e2e@jj-ryu.invalid
 
 jobs:
   e2e:
