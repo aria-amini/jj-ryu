@@ -235,6 +235,7 @@ jobs:
     needs: [validate, prepare, build]
     if: ${{ always() && needs.validate.result == 'success' && (inputs['npm-only'] || (needs.prepare.result == 'success' && needs.build.result == 'success')) }}
     runs-on: ubuntu-latest
+    if: github.repository_owner == 'dmmulroy'
 
     steps:
       - uses: actions/checkout@v6
@@ -324,6 +325,7 @@ jobs:
   publish-crates:
     needs: [prepare, build]
     runs-on: ubuntu-latest
+    if: github.repository_owner == 'dmmulroy'
 
     steps:
       - uses: actions/checkout@v4
@@ -353,6 +355,7 @@ jobs:
   homebrew:
     needs: [prepare, release]
     runs-on: ubuntu-latest
+    if: github.repository_owner == 'dmmulroy'
 
     steps:
       - name: Get tarball SHA256
