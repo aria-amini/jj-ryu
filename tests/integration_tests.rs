@@ -761,3 +761,195 @@ fn test_apply_merged_layers_drops_and_rebases() {
         .collect();
     assert_eq!(names, ["feat-b", "feat-c"]);
 }
+
+/// Fetch and drop one merged layer the way `ryu sync` does
+fn sync_merged_layer(
+    repo: &TempJjRepo,
+    tracking: &mut jj_ryu::tracking::TrackingState,
+    pr_cache: &mut jj_ryu::tracking::PrCache,
+    bookmark: &str,
+    pr_number: u64,
+) -> jj_ryu::repo::JjWorkspace {
+    use jj_ryu::sync_merged::{MergedLayer, apply_merged_layers};
+
+    let mut workspace = repo.workspace();
+    workspace.git_fetch("origin").expect("fetch");
+    let merged = vec![MergedLayer {
+        bookmark: bookmark.to_string(),
+        pr_number: Some(pr_number),
+    }];
+    apply_merged_layers(&mut workspace, tracking, pr_cache, &merged).expect("apply");
+    workspace
+        .update_working_copy()
+        .expect("update working copy");
+    workspace
+}
+
+/// Reproduces a native-stack merge of the bottom layer: main gains an
+/// unrelated commit, GitHub squash-merges feat-a, deletes its branch, and
+/// rebases feat-b server-side. The working
+/// copy sits on top of feat-b with edits that jj has not snapshotted yet.
+/// After sync the working copy must stay on top of feat-b, keep the edits,
+/// and not be stale. After the last layer merges, the working copy must
+/// move to the new trunk.
+#[test]
+fn test_sync_keeps_working_copy_on_server_rebased_stack() {
+    use jj_ryu::tracking::{PrCache, TrackedBookmark, TrackingState};
+
+    let (_remote_dir, remote_path) = TempJjRepo::create_bare_remote();
+    let repo = TempJjRepo::new();
+    repo.add_remote("origin", &remote_path);
+    repo.run_jj(&["bookmark", "create", "main", "-r", "@-"]);
+    repo.push_bookmark("main", "origin");
+
+    for (name, file) in [("feat-a", "a.txt"), ("feat-b", "b.txt")] {
+        std::fs::write(repo.path().join(file), name).expect("write layer file");
+        repo.run_jj(&["commit", "-m", name]);
+        repo.run_jj(&["bookmark", "create", name, "-r", "@-"]);
+        repo.push_bookmark(name, "origin");
+    }
+    std::fs::write(repo.path().join("wip.txt"), "wip").expect("write wip");
+
+    let server = TempDir::new().expect("create server clone dir");
+    let git = |args: &[&str]| {
+        let output = StdCommand::new("git")
+            .args(["-c", "user.name=GitHub", "-c", "user.email=gh@test.com"])
+            .args(args)
+            .current_dir(server.path())
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["clone", &remote_path.to_string_lossy(), "."]);
+    git(&["checkout", "-B", "main", "origin/main"]);
+    std::fs::write(server.path().join("other.txt"), "other").expect("write other");
+    git(&["add", "other.txt"]);
+    git(&["commit", "-m", "Unrelated change on main"]);
+    git(&["merge", "--squash", "origin/feat-a"]);
+    git(&["commit", "-m", "feat-a (#1)"]);
+    git(&["checkout", "-B", "feat-b", "origin/feat-b"]);
+    git(&["rebase", "--onto", "main", "origin/feat-a"]);
+    git(&["push", "--force", "origin", "main", "feat-b", ":feat-a"]);
+
+    let mut tracking = TrackingState::default();
+    for name in ["feat-a", "feat-b"] {
+        tracking.track(TrackedBookmark::new(name.to_string(), "change".to_string()));
+    }
+    let mut pr_cache = PrCache::new();
+    pr_cache.upsert("feat-a", &make_pr(1, "feat-a", "main"), "origin");
+    pr_cache.upsert("feat-b", &make_pr(2, "feat-b", "feat-a"), "origin");
+    let workspace = sync_merged_layer(&repo, &mut tracking, &mut pr_cache, "feat-a", 1);
+
+    let feat_b = workspace.resolve_revset("feat-b").unwrap();
+    let feat_b_remote = workspace.resolve_revset("feat-b@origin").unwrap();
+    let wc = workspace.resolve_revset("@").unwrap();
+    assert_eq!(feat_b[0].commit_id, feat_b_remote[0].commit_id);
+    assert_eq!(wc[0].parents, vec![feat_b[0].commit_id.clone()]);
+
+    let status = repo.run_jj(&["status"]);
+    assert!(status.contains("wip.txt"), "wip edits lost: {status}");
+    assert_eq!(
+        std::fs::read_to_string(repo.path().join("wip.txt")).unwrap(),
+        "wip"
+    );
+    assert!(repo.path().join("other.txt").exists());
+
+    let graph = build_change_graph(&workspace).expect("build graph");
+    let stack = graph.stack.expect("stack");
+    let names: Vec<&str> = stack
+        .segments
+        .iter()
+        .map(|s| s.bookmarks[0].name.as_str())
+        .collect();
+    assert_eq!(names, ["feat-b"]);
+
+    // Merge the last layer: no native stack remains, and GitHub deletes the
+    // branch. The working copy must land on the new trunk.
+    git(&["checkout", "main"]);
+    git(&["merge", "--squash", "origin/feat-b"]);
+    git(&["commit", "-m", "feat-b (#2)"]);
+    git(&["push", "origin", "main", ":feat-b"]);
+
+    let workspace = sync_merged_layer(&repo, &mut tracking, &mut pr_cache, "feat-b", 2);
+
+    let trunk = workspace.resolve_revset("trunk()").unwrap();
+    let wc = workspace.resolve_revset("@").unwrap();
+    assert_eq!(wc[0].parents, vec![trunk[0].commit_id.clone()]);
+    let status = repo.run_jj(&["status"]);
+    assert!(status.contains("wip.txt"), "wip edits lost: {status}");
+    assert!(repo.path().join("b.txt").exists());
+    assert!(build_change_graph(&workspace).unwrap().stack.is_none());
+}
+
+/// A rebase merge lands copies of every commit in the layer on trunk. Sync
+/// must abandon all local commits of the layer, not only its tip, or the
+/// older commits come back as duplicates on top of trunk.
+#[test]
+fn test_sync_abandons_every_commit_of_rebase_merged_layer() {
+    use jj_ryu::tracking::{PrCache, TrackedBookmark, TrackingState};
+
+    let (_remote_dir, remote_path) = TempJjRepo::create_bare_remote();
+    let repo = TempJjRepo::new();
+    repo.add_remote("origin", &remote_path);
+    repo.run_jj(&["bookmark", "create", "main", "-r", "@-"]);
+    repo.push_bookmark("main", "origin");
+
+    for (file, message) in [("a1.txt", "feat-a part 1"), ("a2.txt", "feat-a part 2")] {
+        std::fs::write(repo.path().join(file), message).expect("write layer file");
+        repo.run_jj(&["commit", "-m", message]);
+    }
+    repo.run_jj(&["bookmark", "create", "feat-a", "-r", "@-"]);
+    repo.push_bookmark("feat-a", "origin");
+    std::fs::write(repo.path().join("wip.txt"), "wip").expect("write wip");
+
+    let server = TempDir::new().expect("create server clone dir");
+    let git = |args: &[&str]| {
+        let output = StdCommand::new("git")
+            .args(["-c", "user.name=GitHub", "-c", "user.email=gh@test.com"])
+            .args(args)
+            .current_dir(server.path())
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["clone", &remote_path.to_string_lossy(), "."]);
+    git(&["checkout", "-B", "main", "origin/main"]);
+    std::fs::write(server.path().join("other.txt"), "other").expect("write other");
+    git(&["add", "other.txt"]);
+    git(&["commit", "-m", "Unrelated change on main"]);
+    git(&["checkout", "-B", "feat-a", "origin/feat-a"]);
+    git(&["rebase", "main"]);
+    git(&["checkout", "main"]);
+    git(&["merge", "--ff-only", "feat-a"]);
+    git(&["push", "origin", "main"]);
+
+    let mut tracking = TrackingState::default();
+    tracking.track(TrackedBookmark::new(
+        "feat-a".to_string(),
+        "change".to_string(),
+    ));
+    let mut pr_cache = PrCache::new();
+    pr_cache.upsert("feat-a", &make_pr(1, "feat-a", "main"), "origin");
+    let workspace = sync_merged_layer(&repo, &mut tracking, &mut pr_cache, "feat-a", 1);
+
+    let trunk = workspace.resolve_revset("trunk()").unwrap();
+    let wc = workspace.resolve_revset("@").unwrap();
+    assert_eq!(wc[0].parents, vec![trunk[0].commit_id.clone()]);
+    assert_eq!(workspace.resolve_revset("trunk()..@").unwrap().len(), 1);
+    let status = repo.run_jj(&["status"]);
+    assert!(status.contains("wip.txt"), "wip edits lost: {status}");
+    assert!(
+        !status.contains("conflict"),
+        "conflicts after sync: {status}"
+    );
+}

@@ -122,6 +122,10 @@ pub async fn run_sync(path: &Path, remote: Option<&str>, options: SyncOptions) -
         tracked_names.retain(|name| !merged.iter().any(|m| &m.bookmark == name));
     }
 
+    if !options.dry_run {
+        workspace.update_working_copy()?;
+    }
+
     if !merged.is_empty() && tracked_names.is_empty() && !options.all {
         println!("{}", "Entire stack merged; nothing left to sync.".muted());
         return Ok(());
