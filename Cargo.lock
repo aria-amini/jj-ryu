@@ -2346,7 +2346,7 @@ dependencies = [
 
 [[package]]
 name = "jj-ryu"
-version = "0.2.4-fork.4"
+version = "0.2.4-fork.5"
 dependencies = [
  "anstream",
  "anyhow",
