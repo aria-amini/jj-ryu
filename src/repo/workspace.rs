@@ -27,12 +27,14 @@ use jj_lib::revset::{
 use jj_lib::rewrite::rebase_commit;
 use jj_lib::settings::UserSettings;
 use jj_lib::str_util::{StringExpression, StringMatcher, StringPattern};
+use jj_lib::transaction::Transaction;
 use jj_lib::ui_path::RepoPathUiConverter;
 use jj_lib::workspace::Workspace;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use tracing::warn;
 
 /// Wrapper around jj-lib workspace and repository
 pub struct JjWorkspace {
@@ -235,6 +237,50 @@ impl JjWorkspace {
     fn git_settings(&self) -> Result<GitSettings> {
         GitSettings::from_settings(&self.settings)
             .map_err(|e| Error::Config(format!("Invalid git settings: {e}")))
+    }
+
+    /// Whether Git shares the working directory with jj
+    fn is_colocated(&self, repo: &jj_lib::repo::MutableRepo) -> bool {
+        let Ok(git_repo) = git::get_git_repo(repo.store()) else {
+            return false;
+        };
+        let Some(git_workdir) = git_repo.workdir() else {
+            return false;
+        };
+        std::fs::canonicalize(self.workspace_root()).is_ok_and(|root| root == git_workdir)
+    }
+
+    /// Commit a transaction, first syncing Git refs and `HEAD` in a colocated repo
+    ///
+    /// The jj CLI exports bookmarks and resets Git `HEAD` when it finishes a
+    /// transaction in a colocated repo. jj-lib does not, so without this the
+    /// Git branches and `HEAD` go stale. A bookmark that fails to export is a
+    /// warning, as in the jj CLI. A Git error aborts the transaction.
+    fn commit_transaction(&self, mut tx: Transaction, description: &str) -> Result<()> {
+        if self.is_colocated(tx.repo_mut()) {
+            let workspace_name = self.workspace.workspace_name().to_owned();
+            if let Some(wc_id) = tx.repo().view().get_wc_commit_id(&workspace_name).cloned() {
+                let wc_commit =
+                    tx.repo().store().get_commit(&wc_id).map_err(|e| {
+                        Error::Workspace(format!("Failed to get working copy: {e}"))
+                    })?;
+                pollster::block_on(git::reset_head(
+                    tx.repo_mut(),
+                    &workspace_name,
+                    self.workspace_root(),
+                    &wc_commit,
+                ))
+                .map_err(|e| Error::Git(format!("Failed to reset Git HEAD: {e}")))?;
+            }
+            let stats = git::export_refs(tx.repo_mut())
+                .map_err(|e| Error::Git(format!("Failed to export refs: {e}")))?;
+            for (symbol, reason) in &stats.failed_bookmarks {
+                warn!("Failed to export bookmark {symbol} to Git: {reason}");
+            }
+        }
+        pollster::block_on(tx.commit(description))
+            .map_err(|e| Error::Workspace(format!("Failed to commit '{description}': {e}")))?;
+        Ok(())
     }
 
     /// Get all local bookmarks
@@ -661,11 +707,7 @@ impl JjWorkspace {
                 .map_err(|e| Error::Git(format!("Failed to rebase descendants: {e}")))?;
         }
 
-        // Commit the transaction
-        pollster::block_on(tx.commit(format!("fetch from {remote}")))
-            .map_err(|e| Error::Git(format!("Failed to commit fetch: {e}")))?;
-
-        Ok(())
+        self.commit_transaction(tx, &format!("fetch from {remote}"))
     }
 
     /// Push a bookmark to a remote
@@ -760,10 +802,7 @@ impl JjWorkspace {
         let mut tx = repo.start_transaction();
         tx.repo_mut()
             .set_local_bookmark_target(ref_name, RefTarget::absent());
-        pollster::block_on(tx.commit(format!("delete bookmark {name}")))
-            .map_err(|e| Error::Workspace(format!("Failed to commit bookmark deletion: {e}")))?;
-
-        Ok(())
+        self.commit_transaction(tx, &format!("delete bookmark {name}"))
     }
 
     /// Check whether any commit in the revset has unresolved conflicts
@@ -802,10 +841,7 @@ impl JjWorkspace {
         pollster::block_on(tx.repo_mut().rebase_descendants())
             .map_err(|e| Error::Workspace(format!("Failed to rebase descendants: {e}")))?;
 
-        pollster::block_on(tx.commit("abandon merged commits"))
-            .map_err(|e| Error::Workspace(format!("Failed to commit abandon: {e}")))?;
-
-        Ok(())
+        self.commit_transaction(tx, "abandon merged commits")
     }
 
     /// Rebase the bottom of the current stack onto the trunk tip
@@ -857,8 +893,7 @@ impl JjWorkspace {
         pollster::block_on(tx.repo_mut().rebase_descendants())
             .map_err(|e| Error::Workspace(format!("Failed to rebase descendants: {e}")))?;
 
-        pollster::block_on(tx.commit("rebase stack onto trunk"))
-            .map_err(|e| Error::Workspace(format!("Failed to commit rebase: {e}")))?;
+        self.commit_transaction(tx, "rebase stack onto trunk")?;
 
         Ok(reparented)
     }
