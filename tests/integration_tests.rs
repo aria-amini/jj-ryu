@@ -1161,3 +1161,131 @@ fn test_sync_abandons_every_commit_of_rebase_merged_layer() {
         "conflicts after sync: {status}"
     );
 }
+
+// =============================================================================
+// Colocated Git ref export
+// =============================================================================
+
+/// Git branch target in the colocated repo, read without running jj
+fn colocated_git_branch(repo_path: &std::path::Path, branch: &str) -> Option<String> {
+    let output = StdCommand::new("git")
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{branch}"))
+        .current_dir(repo_path)
+        .output()
+        .expect("read colocated git branch");
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn assert_git_branch_follows_bookmark(
+    repo_path: &std::path::Path,
+    workspace: &jj_ryu::repo::JjWorkspace,
+    name: &str,
+) {
+    let bookmark = workspace.get_local_bookmark(name).unwrap().unwrap();
+    assert_eq!(
+        colocated_git_branch(repo_path, name),
+        Some(bookmark.commit_id),
+        "git branch {name} is stale"
+    );
+}
+
+/// Ryu drives jj-lib directly, so it must export bookmarks to the colocated
+/// Git repo the way the jj CLI does after each operation.
+#[test]
+fn test_git_fetch_exports_fast_forwarded_bookmark_to_git() {
+    let (_remote_dir, remote_path) = TempJjRepo::create_bare_remote();
+    let repo = TempJjRepo::new();
+    repo.add_remote("origin", &remote_path);
+    repo.run_jj(&["bookmark", "create", "main", "-r", "@-"]);
+    repo.push_bookmark("main", "origin");
+
+    let server = TempDir::new().expect("create server clone dir");
+    let git = |args: &[&str]| {
+        let output = StdCommand::new("git")
+            .args(["-c", "user.name=GitHub", "-c", "user.email=gh@test.com"])
+            .args(args)
+            .current_dir(server.path())
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["clone", &remote_path.to_string_lossy(), "."]);
+    git(&["checkout", "-B", "main", "origin/main"]);
+    git(&["commit", "--allow-empty", "-m", "Merge on the server"]);
+    git(&["push", "origin", "main"]);
+
+    let before = colocated_git_branch(repo.path(), "main");
+    let mut workspace = repo.workspace();
+    workspace.git_fetch("origin").expect("fetch");
+
+    let bookmark = workspace.get_local_bookmark("main").unwrap().unwrap();
+    assert_ne!(
+        Some(bookmark.commit_id),
+        before,
+        "fetch did not advance main"
+    );
+    assert_git_branch_follows_bookmark(repo.path(), &workspace, "main");
+}
+
+/// Deleting, abandoning, and rebasing in `apply_merged_layers` each rewrite
+/// bookmarks and the working copy, so the Git branches and `HEAD` must follow.
+#[test]
+fn test_apply_merged_layers_exports_bookmarks_to_git() {
+    use jj_ryu::sync_merged::{MergedLayer, apply_merged_layers};
+    use jj_ryu::tracking::{PrCache, TrackingState};
+
+    let (_remote_dir, remote_path) = TempJjRepo::create_bare_remote();
+    let repo = TempJjRepo::new();
+    repo.add_remote("origin", &remote_path);
+    repo.run_jj(&["bookmark", "create", "main", "-r", "@-"]);
+    repo.push_bookmark("main", "origin");
+    repo.build_stack(&[
+        ("feat-a", "Add A"),
+        ("feat-b", "Add B"),
+        ("feat-c", "Add C"),
+    ]);
+    repo.run_jj(&["new", "main", "-m", "Squash merge of feat-a"]);
+    repo.move_bookmark("main", "@");
+    repo.push_bookmark("main", "origin");
+    repo.run_jj(&["new", "feat-c"]);
+
+    let mut workspace = repo.workspace();
+    let feat_b_before = colocated_git_branch(repo.path(), "feat-b");
+    let mut tracking = TrackingState::default();
+    let mut pr_cache = PrCache::new();
+    let merged = vec![MergedLayer {
+        bookmark: "feat-a".to_string(),
+        pr_number: None,
+    }];
+    apply_merged_layers(&mut workspace, &mut tracking, &mut pr_cache, &merged).unwrap();
+
+    let git_head = StdCommand::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(repo.path())
+        .output()
+        .expect("read git HEAD");
+    let wc_parent = workspace.resolve_revset("@-").unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&git_head.stdout).trim(),
+        wc_parent[0].commit_id,
+        "git HEAD is stale"
+    );
+    assert_eq!(colocated_git_branch(repo.path(), "feat-a"), None);
+    let feat_b = workspace.get_local_bookmark("feat-b").unwrap().unwrap();
+    assert_ne!(
+        Some(feat_b.commit_id),
+        feat_b_before,
+        "feat-b was not rebased"
+    );
+    assert_git_branch_follows_bookmark(repo.path(), &workspace, "feat-b");
+    assert_git_branch_follows_bookmark(repo.path(), &workspace, "feat-c");
+}
