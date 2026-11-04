@@ -147,7 +147,18 @@ Registered stacks get GitHub's native stack UI: a stack map in the merge box, la
 ryu sync
 ```
 
-This fetches from remote and syncs the current stack. `ryu sync` also drops layers whose PRs have merged (deleting the local bookmark and PR cache entry) and rebases the remaining stack onto the updated trunk.
+This fetches from remote and syncs the current stack. Before pushing, `ryu sync` cleans up landed bookmarks and rebases the current stack onto the updated trunk when a dropped layer was part of it.
+
+Cleanup covers every local bookmark, tracked or not, in any workspace's stack, and runs even from an empty working copy at trunk (tracking only gates what is pushed). ryu looks up the PR for each bookmark's head branch on the platform, so it never relies on the local PR cache. A bookmark is deleted, together with its tracking and PR cache entries, when:
+
+- it is a strict ancestor of trunk (nothing unique left), or
+- a merged PR from that branch has the bookmark's current commit as its head. A bookmark exactly at the trunk tip is kept unless such a merged PR exists, so a fresh task bookmark survives.
+
+Landed commits are abandoned, except those a remaining bookmark or another workspace's working copy still needs. The default branch is never deleted, and neither is a bookmark with no PR that is not in trunk, with an open PR, or whose commit differs from its merged PR's head (reused names; reported as kept).
+
+A bookmark whose PR was closed without merging is reported as stale and kept. `ryu sync --prune-closed` deletes those bookmarks, leaving their commits in place. Tracked bookmarks that no longer exist locally are untracked.
+
+`--dry-run` shows what would be deleted and changes nothing; `--confirm` asks before deleting.
 When GitHub rebases the rest of a stack server-side, the working copy follows the rebased bookmarks. ryu snapshots the working copy before it runs and updates it after sync, so uncommitted edits stay in place.
 
 `ryu submit` and `ryu sync` refuse to push conflicted commits. Resolve the conflicts with jj, then submit again.
@@ -311,6 +322,7 @@ Options:
       --dry-run          Preview without making changes
   -c, --confirm          Preview and prompt for confirmation
       --stack <BOOKMARK> Only sync this stack
+      --prune-closed     Also delete bookmarks whose PR closed without merging
       --remote <REMOTE>  Git remote (default: origin)
 ```
 
