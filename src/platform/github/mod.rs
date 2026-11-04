@@ -188,15 +188,6 @@ impl PlatformService for GitHubService {
         Ok(result)
     }
 
-    async fn is_pr_merged(&self, pr_number: u64) -> Result<bool> {
-        let pr = self
-            .client
-            .pulls(&self.config.owner, &self.config.repo)
-            .get(pr_number)
-            .await?;
-        Ok(pr.merged_at.is_some())
-    }
-
     async fn find_prs_for_branch(&self, head_branch: &str) -> Result<Vec<BranchPr>> {
         debug!(head_branch, "finding PRs of any state");
         let head = format!("{}:{head_branch}", self.config.owner);

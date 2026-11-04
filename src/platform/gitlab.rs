@@ -124,30 +124,6 @@ impl PlatformService for GitLabService {
         Ok(result)
     }
 
-    async fn is_pr_merged(&self, pr_number: u64) -> Result<bool> {
-        #[derive(Deserialize)]
-        struct MergeRequestState {
-            state: String,
-        }
-
-        let url = self.api_url(&format!(
-            "/projects/{}/merge_requests/{}",
-            self.encoded_project(),
-            pr_number
-        ));
-        let mr: MergeRequestState = self
-            .client
-            .get(&url)
-            .header("PRIVATE-TOKEN", &self.token)
-            .send()
-            .await?
-            .error_for_status()
-            .map_err(|e| Error::GitLabApi(e.to_string()))?
-            .json()
-            .await?;
-        Ok(mr.state == "merged")
-    }
-
     async fn find_prs_for_branch(&self, head_branch: &str) -> Result<Vec<BranchPr>> {
         #[derive(Deserialize)]
         struct MergeRequestRef {

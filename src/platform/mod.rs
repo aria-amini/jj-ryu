@@ -32,9 +32,6 @@ pub trait PlatformService: Send + Sync {
     /// Find an existing open PR for a head branch
     async fn find_existing_pr(&self, head_branch: &str) -> Result<Option<PullRequest>>;
 
-    /// Check whether a PR is merged
-    async fn is_pr_merged(&self, pr_number: u64) -> Result<bool>;
-
     /// Find the PRs of every state (open, merged, closed) for a head branch
     ///
     /// Returns the most recently updated PRs first. A branch name can be reused,

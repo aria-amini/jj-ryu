@@ -12,7 +12,7 @@ use jj_ryu::types::{
     BranchPr, MergeAsyncOutcome, MergeAsyncState, MergeOptions, Platform, PlatformConfig, PrStack,
     PrStackEntry, PrStackHead, PullRequest, StackRef,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -54,7 +54,6 @@ pub struct MockPlatformService {
     next_stack_number: AtomicU64,
     find_pr_responses: Mutex<HashMap<String, Option<PullRequest>>>,
     find_stack_responses: Mutex<HashMap<u64, Option<PrStack>>>,
-    merged_prs: Mutex<HashSet<u64>>,
     branch_prs: Mutex<HashMap<String, Vec<BranchPr>>>,
     branch_pr_calls: Mutex<Vec<String>>,
     // Response for `unstack` (None = dissolved)
@@ -93,7 +92,6 @@ impl MockPlatformService {
             next_stack_number: AtomicU64::new(1),
             find_pr_responses: Mutex::new(HashMap::new()),
             find_stack_responses: Mutex::new(HashMap::new()),
-            merged_prs: Mutex::new(HashSet::new()),
             branch_prs: Mutex::new(HashMap::new()),
             branch_pr_calls: Mutex::new(Vec::new()),
             unstack_response: Mutex::new(None),
@@ -119,11 +117,6 @@ impl MockPlatformService {
     }
 
     // === Error injection methods ===
-
-    /// Report a PR as merged from `is_pr_merged`
-    pub fn set_pr_merged(&self, pr_number: u64) {
-        self.merged_prs.lock().unwrap().insert(pr_number);
-    }
 
     /// Set the PRs `find_prs_for_branch` returns for a branch (any state)
     pub fn set_branch_prs(&self, branch: &str, prs: Vec<BranchPr>) {
@@ -337,10 +330,6 @@ impl PlatformService for MockPlatformService {
 
         let responses = self.find_pr_responses.lock().unwrap();
         Ok(responses.get(head_branch).cloned().flatten())
-    }
-
-    async fn is_pr_merged(&self, pr_number: u64) -> Result<bool> {
-        Ok(self.merged_prs.lock().unwrap().contains(&pr_number))
     }
 
     async fn find_prs_for_branch(&self, head_branch: &str) -> Result<Vec<BranchPr>> {
