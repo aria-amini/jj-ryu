@@ -14,7 +14,8 @@ pub use gitlab::GitLabService;
 
 use crate::error::{Error, Result};
 use crate::types::{
-    MergeAsyncOutcome, MergeAsyncState, MergeOptions, PlatformConfig, PrStack, PullRequest,
+    BranchPr, MergeAsyncOutcome, MergeAsyncState, MergeOptions, PlatformConfig, PrStack,
+    PullRequest,
 };
 use async_trait::async_trait;
 
@@ -33,6 +34,13 @@ pub trait PlatformService: Send + Sync {
 
     /// Check whether a PR is merged
     async fn is_pr_merged(&self, pr_number: u64) -> Result<bool>;
+
+    /// Find the PRs of every state (open, merged, closed) for a head branch
+    ///
+    /// Returns the most recently updated PRs first. A branch name can be reused,
+    /// so callers compare `head_sha` with their own tip before acting on an
+    /// old PR.
+    async fn find_prs_for_branch(&self, head_branch: &str) -> Result<Vec<BranchPr>>;
 
     /// Create a new PR with default options (non-draft).
     ///

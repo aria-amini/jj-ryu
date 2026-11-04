@@ -9,8 +9,8 @@ mod tests;
 use crate::error::{Error, Result};
 use crate::platform::PlatformService;
 use crate::types::{
-    MergeAsyncOutcome, MergeAsyncState, MergeOptions, Platform, PlatformConfig, PrStack,
-    PullRequest, normalize_host,
+    BranchPr, MergeAsyncOutcome, MergeAsyncState, MergeOptions, Platform, PlatformConfig, PrStack,
+    PrState, PullRequest, normalize_host,
 };
 use async_trait::async_trait;
 use octocrab::Octocrab;
@@ -195,6 +195,39 @@ impl PlatformService for GitHubService {
             .get(pr_number)
             .await?;
         Ok(pr.merged_at.is_some())
+    }
+
+    async fn find_prs_for_branch(&self, head_branch: &str) -> Result<Vec<BranchPr>> {
+        debug!(head_branch, "finding PRs of any state");
+        let head = format!("{}:{head_branch}", self.config.owner);
+
+        let prs = self
+            .client
+            .pulls(&self.config.owner, &self.config.repo)
+            .list()
+            .head(head)
+            .state(octocrab::params::State::All)
+            .sort(octocrab::params::pulls::Sort::Updated)
+            .direction(octocrab::params::Direction::Descending)
+            .per_page(30)
+            .send()
+            .await?;
+
+        Ok(prs
+            .items
+            .iter()
+            .map(|pr| BranchPr {
+                number: pr.number,
+                state: if pr.merged_at.is_some() {
+                    PrState::Merged
+                } else if pr.closed_at.is_some() {
+                    PrState::Closed
+                } else {
+                    PrState::Open
+                },
+                head_sha: pr.head.sha.clone(),
+            })
+            .collect())
     }
 
     async fn create_pr_with_options(

@@ -104,6 +104,28 @@ pub struct PullRequest {
     pub is_draft: bool,
 }
 
+/// State of a PR/MR found by head branch
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrState {
+    /// Still open
+    Open,
+    /// Merged into its base
+    Merged,
+    /// Closed without merging
+    Closed,
+}
+
+/// A PR/MR of any state, found by head branch
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchPr {
+    /// PR/MR number
+    pub number: u64,
+    /// Open, merged, or closed
+    pub state: PrState,
+    /// Head commit SHA of the PR/MR (its final head once merged or closed)
+    pub head_sha: String,
+}
+
 /// A native GitHub pull request stack
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrStack {

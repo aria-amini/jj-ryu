@@ -2,7 +2,7 @@
 
 use crate::error::{Error, Result};
 use crate::platform::PlatformService;
-use crate::types::{Platform, PlatformConfig, PullRequest, normalize_host};
+use crate::types::{BranchPr, Platform, PlatformConfig, PrState, PullRequest, normalize_host};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -146,6 +146,50 @@ impl PlatformService for GitLabService {
             .json()
             .await?;
         Ok(mr.state == "merged")
+    }
+
+    async fn find_prs_for_branch(&self, head_branch: &str) -> Result<Vec<BranchPr>> {
+        #[derive(Deserialize)]
+        struct MergeRequestRef {
+            iid: u64,
+            state: String,
+            #[serde(default)]
+            sha: Option<String>,
+        }
+
+        let url = self.api_url(&format!(
+            "/projects/{}/merge_requests",
+            self.encoded_project()
+        ));
+        let mrs: Vec<MergeRequestRef> = self
+            .client
+            .get(&url)
+            .header("PRIVATE-TOKEN", &self.token)
+            .query(&[
+                ("source_branch", head_branch),
+                ("state", "all"),
+                ("order_by", "updated_at"),
+                ("per_page", "30"),
+            ])
+            .send()
+            .await?
+            .error_for_status()
+            .map_err(|e| Error::GitLabApi(e.to_string()))?
+            .json()
+            .await?;
+
+        Ok(mrs
+            .into_iter()
+            .map(|mr| BranchPr {
+                number: mr.iid,
+                state: match mr.state.as_str() {
+                    "merged" => PrState::Merged,
+                    "closed" => PrState::Closed,
+                    _ => PrState::Open,
+                },
+                head_sha: mr.sha.unwrap_or_default(),
+            })
+            .collect())
     }
 
     async fn create_pr_with_options(

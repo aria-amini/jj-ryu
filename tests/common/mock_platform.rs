@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use jj_ryu::error::{Error, Result};
 use jj_ryu::platform::PlatformService;
 use jj_ryu::types::{
-    MergeAsyncOutcome, MergeAsyncState, MergeOptions, Platform, PlatformConfig, PrStack,
+    BranchPr, MergeAsyncOutcome, MergeAsyncState, MergeOptions, Platform, PlatformConfig, PrStack,
     PrStackEntry, PrStackHead, PullRequest, StackRef,
 };
 use std::collections::{HashMap, HashSet};
@@ -55,6 +55,8 @@ pub struct MockPlatformService {
     find_pr_responses: Mutex<HashMap<String, Option<PullRequest>>>,
     find_stack_responses: Mutex<HashMap<u64, Option<PrStack>>>,
     merged_prs: Mutex<HashSet<u64>>,
+    branch_prs: Mutex<HashMap<String, Vec<BranchPr>>>,
+    branch_pr_calls: Mutex<Vec<String>>,
     // Response for `unstack` (None = dissolved)
     unstack_response: Mutex<Option<PrStack>>,
     // Call tracking
@@ -92,6 +94,8 @@ impl MockPlatformService {
             find_pr_responses: Mutex::new(HashMap::new()),
             find_stack_responses: Mutex::new(HashMap::new()),
             merged_prs: Mutex::new(HashSet::new()),
+            branch_prs: Mutex::new(HashMap::new()),
+            branch_pr_calls: Mutex::new(Vec::new()),
             unstack_response: Mutex::new(None),
             find_pr_calls: Mutex::new(Vec::new()),
             create_pr_calls: Mutex::new(Vec::new()),
@@ -119,6 +123,19 @@ impl MockPlatformService {
     /// Report a PR as merged from `is_pr_merged`
     pub fn set_pr_merged(&self, pr_number: u64) {
         self.merged_prs.lock().unwrap().insert(pr_number);
+    }
+
+    /// Set the PRs `find_prs_for_branch` returns for a branch (any state)
+    pub fn set_branch_prs(&self, branch: &str, prs: Vec<BranchPr>) {
+        self.branch_prs
+            .lock()
+            .unwrap()
+            .insert(branch.to_string(), prs);
+    }
+
+    /// Branches `find_prs_for_branch` was called with
+    pub fn get_branch_pr_calls(&self) -> Vec<String> {
+        self.branch_pr_calls.lock().unwrap().clone()
     }
 
     /// Make `find_existing_pr` return an error
@@ -324,6 +341,20 @@ impl PlatformService for MockPlatformService {
 
     async fn is_pr_merged(&self, pr_number: u64) -> Result<bool> {
         Ok(self.merged_prs.lock().unwrap().contains(&pr_number))
+    }
+
+    async fn find_prs_for_branch(&self, head_branch: &str) -> Result<Vec<BranchPr>> {
+        self.branch_pr_calls
+            .lock()
+            .unwrap()
+            .push(head_branch.to_string());
+        Ok(self
+            .branch_prs
+            .lock()
+            .unwrap()
+            .get(head_branch)
+            .cloned()
+            .unwrap_or_default())
     }
 
     async fn create_pr_with_options(
