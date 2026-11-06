@@ -5,7 +5,7 @@
 use crate::error::{Error, Result};
 use crate::platform::PlatformService;
 use crate::submit::SubmissionAnalysis;
-use crate::submit::analysis::{generate_pr_title, get_base_branch};
+use crate::submit::analysis::generate_pr_title;
 use crate::types::{Bookmark, NarrowedBookmarkSegment, PullRequest};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -354,7 +354,7 @@ pub async fn create_submission_plan(
         // Check if needs PR creation
         if let Some(pr) = existing_prs.get(&bookmark.name) {
             // PR exists - check if base needs updating
-            let expected_base = get_base_branch(&bookmark.name, segments, default_branch)?;
+            let expected_base = analysis.base_branch(&bookmark.name, default_branch)?;
 
             if pr.base_ref != expected_base {
                 prs_to_update_base.push(PrBaseUpdate {
@@ -366,7 +366,7 @@ pub async fn create_submission_plan(
             }
         } else {
             // PR doesn't exist - needs creation
-            let base_branch = get_base_branch(&bookmark.name, segments, default_branch)?;
+            let base_branch = analysis.base_branch(&bookmark.name, default_branch)?;
             let title = generate_pr_title(&bookmark.name, segments)?;
 
             prs_to_create.push(PrToCreate {

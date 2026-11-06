@@ -327,6 +327,11 @@ async fn build_analysis(
                 }
             }
 
+            // The target's PR stays based on its parent, which is not in the plan
+            analysis.base_bookmark = target_idx
+                .checked_sub(1)
+                .map(|idx| analysis.segments[idx].bookmark.name.clone());
+
             // Keep only the target segment
             analysis.segments = vec![analysis.segments.remove(target_idx)];
         }
@@ -345,6 +350,11 @@ async fn build_analysis(
                 .iter()
                 .position(|s| s.bookmarks.iter().any(|b| b.name == target))
                 .expect("target was set by analyze_submission");
+
+            // The first kept segment stays based on the one below it
+            analysis.base_bookmark = target_idx
+                .checked_sub(1)
+                .map(|idx| select_bookmark_for_segment(&stack.segments[idx], None).name);
 
             // Build narrowed segments from target to leaf (skip segments before target)
             analysis.segments = stack.segments[target_idx..]
