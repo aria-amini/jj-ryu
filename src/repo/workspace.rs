@@ -327,6 +327,19 @@ impl JjWorkspace {
         Ok(bookmarks)
     }
 
+    /// Working-copy commit IDs of every workspace except this one
+    pub fn other_working_copy_commits(&self) -> Result<Vec<String>> {
+        let repo = self.repo()?;
+        let own = self.workspace.workspace_name();
+        Ok(repo
+            .view()
+            .wc_commit_ids()
+            .iter()
+            .filter(|(name, _)| name.as_str() != own.as_str())
+            .map(|(_, id)| id.hex())
+            .collect())
+    }
+
     /// Get a specific local bookmark
     pub fn get_local_bookmark(&self, name: &str) -> Result<Option<Bookmark>> {
         let repo = self.repo()?;

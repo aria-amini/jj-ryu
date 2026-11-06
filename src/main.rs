@@ -74,7 +74,11 @@ enum Commands {
         all: bool,
     },
 
-    /// Sync current stack with remote
+    /// Sync current stack with remote and delete landed local bookmarks
+    ///
+    /// Deletes every local bookmark (tracked or not, in any stack) whose PR
+    /// merged or that is already an ancestor of trunk. A bookmark with no
+    /// merged PR that is not in trunk is never deleted.
     Sync {
         /// Dry run - show what would be done without making changes
         #[arg(long)]
@@ -91,6 +95,12 @@ enum Commands {
         /// Sync all bookmarks in `trunk()`..@ (ignore tracking)
         #[arg(long, short)]
         all: bool,
+
+        /// Also delete bookmarks whose PR was closed without merging
+        ///
+        /// Their commits are kept; only the bookmark goes.
+        #[arg(long)]
+        prune_closed: bool,
     },
 
     /// Authentication management
@@ -244,6 +254,7 @@ async fn main() -> Result<()> {
             confirm,
             remote,
             all,
+            prune_closed,
         }) => {
             cli::run_sync(
                 &path,
@@ -252,6 +263,7 @@ async fn main() -> Result<()> {
                     dry_run,
                     confirm,
                     all,
+                    prune_closed,
                 },
             )
             .await?;
