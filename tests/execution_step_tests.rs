@@ -592,6 +592,106 @@ async fn test_constraint_display_formatting() {
 }
 
 // =============================================================================
+// Mid-stack Submission Tests (--only, --stack from a non-root bookmark)
+// =============================================================================
+
+/// Analysis for the top bookmark of A→B→C, as `--only feat-c` builds it:
+/// just that segment, with the bookmark below it recorded as the base.
+fn only_top_analysis(repo: &TempJjRepo) -> jj_ryu::submit::SubmissionAnalysis {
+    let workspace = repo.workspace();
+    let graph = build_change_graph(&workspace).expect("build graph");
+    let mut analysis = analyze_submission(&graph, Some("feat-c")).expect("analyze");
+
+    analysis.base_bookmark = Some(analysis.segments[1].bookmark.name.clone());
+    analysis.segments = vec![analysis.segments.remove(2)];
+    analysis
+}
+
+/// Test: a lone mid-stack segment keeps its PR on its parent, not the default branch
+///
+/// Regression: `--only` kept one segment, which looked like the bottom of the
+/// stack, so the PR was retargeted to the default branch.
+#[tokio::test]
+async fn test_mid_stack_submission_keeps_parent_as_base() {
+    let repo = TempJjRepo::new();
+    repo.build_stack(&[
+        ("feat-a", "Add A"),
+        ("feat-b", "Add B"),
+        ("feat-c", "Add C"),
+    ]);
+
+    let analysis = only_top_analysis(&repo);
+    assert_eq!(analysis.segments.len(), 1);
+
+    let mock = MockPlatformService::with_config(github_config());
+    mock.set_find_pr_response("feat-c", Some(make_pr(3, "feat-c", "feat-b")));
+
+    let plan = create_submission_plan(&analysis, &mock, "origin", "main")
+        .await
+        .expect("create plan");
+
+    assert_eq!(plan.count_updates(), 0, "the PR is already on feat-b");
+}
+
+/// Test: a PR that really is on the wrong base is still moved to the parent
+#[tokio::test]
+async fn test_mid_stack_submission_retargets_to_parent() {
+    let repo = TempJjRepo::new();
+    repo.build_stack(&[
+        ("feat-a", "Add A"),
+        ("feat-b", "Add B"),
+        ("feat-c", "Add C"),
+    ]);
+
+    let analysis = only_top_analysis(&repo);
+
+    let mock = MockPlatformService::with_config(github_config());
+    mock.set_find_pr_response("feat-c", Some(make_pr(3, "feat-c", "main")));
+
+    let plan = create_submission_plan(&analysis, &mock, "origin", "main")
+        .await
+        .expect("create plan");
+
+    let update = plan
+        .execution_steps
+        .iter()
+        .find_map(|step| match step {
+            ExecutionStep::UpdateBase(update) => Some(update),
+            _ => None,
+        })
+        .expect("a base update");
+    assert_eq!(update.expected_base, "feat-b");
+}
+
+/// Test: a new PR for a mid-stack segment is created against its parent
+#[tokio::test]
+async fn test_mid_stack_submission_creates_pr_on_parent() {
+    let repo = TempJjRepo::new();
+    repo.build_stack(&[
+        ("feat-a", "Add A"),
+        ("feat-b", "Add B"),
+        ("feat-c", "Add C"),
+    ]);
+
+    let analysis = only_top_analysis(&repo);
+    let mock = MockPlatformService::with_config(github_config());
+
+    let plan = create_submission_plan(&analysis, &mock, "origin", "main")
+        .await
+        .expect("create plan");
+
+    let create = plan
+        .execution_steps
+        .iter()
+        .find_map(|step| match step {
+            ExecutionStep::CreatePr(create) => Some(create),
+            _ => None,
+        })
+        .expect("a PR creation");
+    assert_eq!(create.base_branch, "feat-b");
+}
+
+// =============================================================================
 // Cycle Detection Test
 // =============================================================================
 

@@ -13,6 +13,28 @@ pub struct SubmissionAnalysis {
     pub target_bookmark: String,
     /// Segments to submit (from trunk towards target), each narrowed to one bookmark
     pub segments: Vec<NarrowedBookmarkSegment>,
+    /// Bookmark directly below the first segment, when the submission starts
+    /// mid-stack (`--only`, `--stack` from a non-root bookmark). The first
+    /// segment's PR is based on it, not on the default branch.
+    pub base_bookmark: Option<String>,
+}
+
+impl SubmissionAnalysis {
+    /// Expected base branch for a bookmark in this submission
+    ///
+    /// Like [`get_base_branch`], but the first segment is based on
+    /// `base_bookmark` when the submission starts mid-stack.
+    pub fn base_branch(&self, bookmark_name: &str, default_branch: &str) -> Result<String> {
+        let starts_here = self
+            .segments
+            .first()
+            .is_some_and(|segment| segment.bookmark.name == bookmark_name);
+
+        match (&self.base_bookmark, starts_here) {
+            (Some(base), true) => Ok(base.clone()),
+            _ => get_base_branch(bookmark_name, &self.segments, default_branch),
+        }
+    }
 }
 
 /// Analyze what needs to be submitted for a given bookmark
@@ -70,6 +92,7 @@ pub fn analyze_submission(
     Ok(SubmissionAnalysis {
         target_bookmark: actual_target,
         segments: narrowed,
+        base_bookmark: None,
     })
 }
 
